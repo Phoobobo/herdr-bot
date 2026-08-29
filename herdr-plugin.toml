@@ -1,0 +1,54 @@
+id = "phoobobo.herdr-bot"
+name = "herdr-bot"
+version = "0.1.0"
+min_herdr_version = "0.8.2"
+description = "One team, one Herdr session. Manage bots, tags, bodies, and channels."
+platforms = ["macos", "linux"]
+
+[[actions]]
+id = "bots"
+title = "Resume default team"
+contexts = ["global", "workspace"]
+command = ["bun", "run", "src/actions.ts", "bots"]
+
+[[actions]]
+id = "create-bot"
+title = "Create bot"
+contexts = ["global", "workspace"]
+command = ["bun", "run", "src/actions.ts", "create-bot"]
+
+[[actions]]
+id = "rename-bot"
+title = "Rename bot"
+contexts = ["global", "workspace"]
+command = ["bun", "run", "src/actions.ts", "rename-bot"]
+
+[[actions]]
+id = "set-tag"
+title = "Set bot tag"
+contexts = ["global", "workspace"]
+command = ["bun", "run", "src/actions.ts", "set-tag"]
+
+[[actions]]
+id = "set-description"
+title = "Set bot description"
+contexts = ["global", "workspace"]
+command = ["bun", "run", "src/actions.ts", "set-description"]
+
+[[actions]]
+id = "set-body"
+title = "Set bot body"
+contexts = ["global", "workspace"]
+command = ["bun", "run", "src/actions.ts", "set-body"]
+
+[[actions]]
+id = "create-channel"
+title = "Create channel"
+contexts = ["global", "workspace"]
+command = ["bun", "run", "src/actions.ts", "create-channel"]
+
+[[panes]]
+id = "tui"
+title = "herdr-bot"
+placement = "overlay"
+command = ["bun", "run", "src/tui.ts"]

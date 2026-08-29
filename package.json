@@ -1,0 +1,16 @@
+{
+  "name": "herdr-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "herdr-bots": "bin/herdr-bots"
+  },
+  "scripts": {
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "typescript": "^5.9.2"
+  }
+}

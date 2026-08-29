@@ -1,0 +1,145 @@
+# herdr-bot
+
+A team of bots that lives **inside** [herdr](https://herdr.dev) as a plugin overlay TUI.
+
+One **herdr-bot team** owns one **Herdr session**. The default team maps to the default Herdr session (`default`).
+
+When you type **`herdr bots`**, the default team resumes and an overlay TUI opens listing the four default members:
+
+| name | tag | body | description |
+| ---- | --- | ---- | ----------- |
+| 幕僚长 | lead | pi | 管理你的其他 Bot，需要决策时找你 |
+| 研发工程师 | eng | pi | You are an awesome software engineer. |
+| 研究员 | research | pi | The user works with GitHub every day — start with those tools when suggesting connectors or taking on work. |
+| 测试工程师 | qa | pi | You are an awesome Quality Assurance Engineer. |
+
+Those four names are the product gate: resume must return exactly them — extra or missing fails.
+
+## Requirements
+
+- herdr ≥ 0.8.2 with a running server (the default session)
+- [bun](https://bun.sh) on the PATH herdr was started with
+- macOS or Linux
+
+## Install
+
+Once published:
+
+```bash
+herdr plugin install Phoobobo/herdr-bot
+```
+
+Local development:
+
+```bash
+herdr plugin link /path/to/herdr-bot
+cd /path/to/herdr-bot
+bun install
+bun link                 # puts `herdr-bots` on PATH
+```
+
+GitHub topic: **`herdr-plugin`** (required for the herdr marketplace index).
+
+## How `herdr bots` works
+
+Herdr 0.8.2 has **no plugin CLI subcommands**, so `herdr bots` is not a native herdr command. This plugin implements the product command as three equivalent entrypoints:
+
+1. **Plugin action** (from inside herdr, or scripts):
+
+   ```bash
+   herdr plugin action invoke phoobobo.herdr-bot.bots
+   ```
+
+   This resumes the default team and opens the overlay TUI.
+
+2. **CLI binary** `herdr-bots` (like workboard's `herdr-workboard`):
+
+   ```bash
+   herdr-bots                 # resume default team + open overlay
+   herdr-bots bots list --json
+   herdr-bots team show --json
+   ```
+
+3. **Shell shim** so you can type `herdr bots` without wrapping `/Users/phoobobo/.local/bin/herdr` (a wrapper there would be clobbered by `herdr update`):
+
+   ```bash
+   source /path/to/herdr-bot/shell/herdr.zsh
+   herdr bots
+   ```
+
+   `scripts/herdr-bots.sh` is the same CLI via bun if `herdr-bots` is not on PATH.
+
+Open the overlay directly:
+
+```bash
+herdr plugin pane open --plugin phoobobo.herdr-bot --entrypoint tui --placement overlay --focus
+```
+
+## One team = one session
+
+- Default team id `default` ↔ Herdr session `default` (socket `~/.config/herdr/herdr.sock`).
+- Resume never targets other named sessions (for example `taya`).
+- Team/bot/channel state lives under `HERDR_PLUGIN_STATE_DIR` (CLI fallback: `~/.local/state/herdr/plugins/phoobobo.herdr-bot`). The default roster is seeded on first run if missing.
+
+## Bot body (harness)
+
+`body` is the installed Herdr integration that runs the bot. Options come from `herdr integration status`; **`not installed` is skipped**. Default body is **`pi`**.
+
+On a machine with the usual integrations that includes at least: `pi`, `omp`, `claude`, `codex`, `copilot`, `opencode`, `hermes`, `grok`.
+
+```bash
+herdr-bots bodies list --json
+herdr-bots bots body 研发工程师 --body claude
+```
+
+## Overlay TUI
+
+Keyboard-driven first slice (not a full Grok GUI clone):
+
+- **Header** — team + session name
+- **Left** — bots, then channels
+- **Main** — selected bot (name / tag / description / body) or channel messages
+
+| key | action |
+| --- | ------ |
+| `j` / `k` | move |
+| `n` | new bot |
+| `c` | new channel |
+| `e` / `t` / `d` / `b` | edit name / tag / description / body |
+| `m` | post to the selected channel (bots can talk to each other here) |
+| `?` | help |
+| `q` / `esc` | quit (closes the overlay) |
+
+## CLI
+
+```bash
+herdr-bots [--json] [--no-open]              # resume default team, open overlay
+herdr-bots team show [--json]
+herdr-bots bots list [--json]
+herdr-bots bots create --name <name> [--tag t] [--description d] [--body pi]
+herdr-bots bots rename <id|name> --name <name>
+herdr-bots bots tag <id|name> --tag <tag>
+herdr-bots bots description <id|name> --description <text>
+herdr-bots bots body <id|name> --body <harness>
+herdr-bots channel list [--json]
+herdr-bots channel create --name <name>
+herdr-bots channel post <channel> --from <bot> --text <text>
+herdr-bots bodies list [--json]
+```
+
+`--json` is the QA surface. `herdr-bots bots list --json` must return exactly the four default names on a fresh state dir.
+
+Plugin actions: `bots`, `create-bot`, `rename-bot`, `set-tag`, `set-description`, `set-body`, `create-channel`.
+
+Manifest id: **`phoobobo.herdr-bot`**.
+
+## Tests
+
+```bash
+bun install
+bun test
+```
+
+## License
+
+Use it. No secrets belong in this repo.
