@@ -7,6 +7,10 @@ export const DEFAULT_BODY = "pi";
 
 export const DEFAULT_MEMBER_NAMES = ["幕僚长", "研发工程师", "研究员", "测试工程师"] as const;
 
+/** Overlay user (not a bot). DM/channel posts from the composer use this id. */
+export const USER_ID = "user";
+export const USER_DISPLAY_NAME = "Phoobobo";
+
 export interface Bot {
   id: string;
   name: string;
@@ -45,6 +49,8 @@ export interface Team {
   members: Bot[];
   bots: Bot[];
   channels: Channel[];
+  /** 1:1 threads keyed by bot id. Optional for backward compatibility; version stays 1. */
+  dms?: Record<string, ChannelMessage[]>;
   workspace_id?: string | null;
   created_at: number;
   updated_at: number;

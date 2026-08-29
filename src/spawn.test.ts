@@ -4,8 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { DEFAULT_MEMBER_NAMES } from "./types.ts";
 import { resumeDefaultTeam } from "./store.ts";
-import { agentSlug, deliverChannelPost, ensureTeamLive, formatChannelPrompt, listLiveBots, openBot, setHerdrRunner } from "./spawn.ts";
-import { createChannel, postToChannel } from "./store.ts";
+import { USER_ID } from "./types.ts";
+import { agentSlug, deliverChannelPost, ensureTeamLive, formatChannelPrompt, formatDmPrompt, listLiveBots, openBot, sendComposer, setHerdrRunner } from "./spawn.ts";
+import { createChannel, getDm, loadOrSeedDefaultTeam, postToChannel } from "./store.ts";
 
 let dir: string;
 let calls: string[][];
@@ -136,4 +137,48 @@ test("channel post prompts every live member except the sender", async () => {
   const text = formatChannelPrompt("standup", "幕僚长", "hello team");
   expect(prompts.every((c) => c[3] === text)).toBe(true);
   expect(prompts.some((c) => c[2] === "lead")).toBe(false);
+});
+
+test("channel post from user prompts every live member", async () => {
+  await ensureTeamLive();
+  createChannel({ name: "standup" });
+  const result = await deliverChannelPost("standup", "user", "hi everyone");
+  expect(result.delivered.map((m) => m.name).sort()).toEqual([...DEFAULT_MEMBER_NAMES].sort());
+  expect(result.skipped).toEqual([]);
+  const prompts = calls.filter((c) => c[0] === "agent" && c[1] === "prompt");
+  expect(prompts.map((c) => c[2]).sort()).toEqual(["eng", "lead", "qa", "research"]);
+  const body = formatChannelPrompt("standup", "Phoobobo", "hi everyone");
+  expect(prompts.every((c) => c[3] === body)).toBe(true);
+});
+
+test("sendComposer on a bot posts a DM as user and prompts that agent", async () => {
+  resumeDefaultTeam();
+  const msg = await sendComposer({ kind: "bot", index: 0 }, "hello lead");
+  expect(msg).not.toBeNull();
+  expect(msg!.from_bot_id).toBe(USER_ID);
+  expect(msg!.text).toBe("hello lead");
+  const reloaded = loadOrSeedDefaultTeam();
+  const dm = getDm(reloaded, "lead");
+  expect(dm).toHaveLength(1);
+  expect(dm[0].from_bot_id).toBe("user");
+  expect(dm[0].text).toBe("hello lead");
+  const prompts = calls.filter((c) => c[0] === "agent" && c[1] === "prompt");
+  expect(prompts.some((c) => c[2] === "lead" && c[3] === formatDmPrompt("hello lead"))).toBe(true);
+});
+
+test("sendComposer on a channel posts as user and delivers to live members", async () => {
+  await ensureTeamLive();
+  createChannel({ name: "standup" });
+  const before = calls.filter((c) => c[0] === "agent" && c[1] === "prompt").length;
+  const msg = await sendComposer({ kind: "channel", index: 0 }, "hi team");
+  expect(msg).not.toBeNull();
+  expect(msg!.from_bot_id).toBe(USER_ID);
+  expect(msg!.text).toBe("hi team");
+  const reloaded = loadOrSeedDefaultTeam();
+  expect(reloaded.channels[0].messages[0].from_bot_id).toBe("user");
+  expect(reloaded.channels[0].messages[0].text).toBe("hi team");
+  const prompts = calls.filter((c) => c[0] === "agent" && c[1] === "prompt").slice(before);
+  expect(prompts.map((c) => c[2]).sort()).toEqual(["eng", "lead", "qa", "research"]);
+  const body = formatChannelPrompt("standup", "Phoobobo", "hi team");
+  expect(prompts.every((c) => c[3] === body)).toBe(true);
 });

@@ -13,6 +13,8 @@ import {
   DEFAULT_SESSION,
   DEFAULT_TEAM_ID,
   PLUGIN_ID,
+  USER_DISPLAY_NAME,
+  USER_ID,
   type Bot,
   type Channel,
   type ChannelMessage,
@@ -69,6 +71,7 @@ function syncAliases(team: Team): Team {
   team.members = members;
   team.bots = members;
   team.channels ||= [];
+  team.dms ||= {};
   team.session ||= DEFAULT_SESSION;
   team.name ||= DEFAULT_TEAM_ID;
   team.id ||= DEFAULT_TEAM_ID;
@@ -97,6 +100,7 @@ export function seedTeam(): Team {
     members,
     bots: members,
     channels: [],
+    dms: {},
     created_at: t,
     updated_at: t,
   });
@@ -299,6 +303,17 @@ export function createChannel(
   return ch;
 }
 
+export function isUserRef(idOrName: string): boolean {
+  return idOrName === USER_ID || idOrName === USER_DISPLAY_NAME;
+}
+
+/** Resolve a message sender: the overlay user, or a bot id/name. */
+export function resolveFrom(team: Team, fromIdOrName: string): { id: string; name: string } {
+  if (isUserRef(fromIdOrName)) return { id: USER_ID, name: USER_DISPLAY_NAME };
+  const bot = findBot(team, fromIdOrName);
+  return { id: bot.id, name: bot.name };
+}
+
 export function postToChannel(channel: string, fromBot: string, text: string): ChannelMessage;
 export function postToChannel(team: Team, channel: string, fromBot: string, text: string): ChannelMessage;
 export function postToChannel(
@@ -312,15 +327,51 @@ export function postToChannel(
   const fromBot = typeof teamOrChannel === "string" ? channelOrFrom : fromOrText;
   const msgText = typeof teamOrChannel === "string" ? fromOrText : text ?? "";
   const ch = findChannel(team, channel);
-  const bot = findBot(team, fromBot);
+  const from = resolveFrom(team, fromBot);
   const msg: ChannelMessage = {
     id: newId("msg"),
-    from_bot_id: bot.id,
+    from_bot_id: from.id,
     text: msgText,
     created_at: now(),
   };
   ch.messages.push(msg);
   ch.updated_at = msg.created_at;
+  saveTeam(team);
+  return msg;
+}
+
+export function getDm(botId: string): ChannelMessage[];
+export function getDm(team: Team, botId: string): ChannelMessage[];
+export function getDm(teamOrBot: Team | string, botId?: string): ChannelMessage[] {
+  const team = typeof teamOrBot === "string" ? loadState() : syncAliases(teamOrBot);
+  const id = typeof teamOrBot === "string" ? teamOrBot : botId!;
+  const bot = findBot(team, id);
+  return team.dms?.[bot.id] ?? [];
+}
+
+export function postToDm(botId: string, fromIdOrName: string, text: string): ChannelMessage;
+export function postToDm(team: Team, botId: string, fromIdOrName: string, text: string): ChannelMessage;
+export function postToDm(
+  teamOrBot: Team | string,
+  botOrFrom: string,
+  fromOrText?: string,
+  text?: string,
+): ChannelMessage {
+  const team = typeof teamOrBot === "string" ? loadState() : syncAliases(teamOrBot);
+  const botId = typeof teamOrBot === "string" ? teamOrBot : botOrFrom;
+  const fromIdOrName = typeof teamOrBot === "string" ? botOrFrom : fromOrText!;
+  const msgText = typeof teamOrBot === "string" ? fromOrText ?? "" : text ?? "";
+  const bot = findBot(team, botId);
+  const from = resolveFrom(team, fromIdOrName);
+  const msg: ChannelMessage = {
+    id: newId("msg"),
+    from_bot_id: from.id,
+    text: msgText,
+    created_at: now(),
+  };
+  team.dms ||= {};
+  team.dms[bot.id] ||= [];
+  team.dms[bot.id].push(msg);
   saveTeam(team);
   return msg;
 }

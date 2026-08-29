@@ -4,7 +4,7 @@
 import * as store from "./store.ts";
 import { runHerdr } from "./herdr.ts";
 import { agentSlug } from "./spawn.ts";
-import type { Bot, Channel, ChannelMessage, Team } from "./types.ts";
+import { USER_DISPLAY_NAME, USER_ID, type Channel, type ChannelMessage, type Team } from "./types.ts";
 
 export type PaneReader = (slug: string) => Promise<string>;
 
@@ -46,7 +46,8 @@ const BOX = /^[\s╭╮╰╯─│━│]+$/;
 const FOOTER = /(CH\d|\$\d|gpt-|openai-codex|pi update|auto\)|↑)/i;
 
 export function inboundMarker(channel: string, fromName: string, text: string): string {
-  return `[#${channel}] ${fromName}: ${text}`.trim();
+  const tag = channel === "dm" ? "dm" : `#${channel}`;
+  return `[${tag}] ${fromName}: ${text}`.trim();
 }
 
 function isChrome(line: string): boolean {
@@ -78,7 +79,7 @@ export function extractReplyFor(
       continue;
     }
     if (isChrome(line)) continue;
-    const inbound = line.match(/^\[#([^\]]+)\]\s+([^:]+):\s*(.*)$/);
+    const inbound = line.match(/^\[#?([^\]]+)\]\s+([^:]+):\s*(.*)$/);
     if (inbound && collected.length) break;
     const piece = (inbound ? inbound[3] : line).trim();
     if (!piece) continue;
@@ -103,8 +104,8 @@ export async function syncChannelReplies(channel: string): Promise<{ channel: Ch
   const ch = store.findChannel(team, channel);
   const added: SyncedReply[] = [];
   const outbounds = ch.messages.filter((msg) => {
-    const bot = team.members.find((b) => b.id === msg.from_bot_id);
-    return !!bot;
+    if (msg.from_bot_id === USER_ID) return true;
+    return !!team.members.find((b) => b.id === msg.from_bot_id);
   });
 
   for (const bot of team.members) {
@@ -118,9 +119,9 @@ export async function syncChannelReplies(channel: string): Promise<{ channel: Ch
     if (!paneText.trim()) continue;
 
     for (const outbound of outbounds) {
-      const author = team.members.find((b) => b.id === outbound.from_bot_id);
-      if (!author || author.id === bot.id) continue;
-      const reply = extractReplyFor(paneText, ch.name, author.name, outbound.text);
+      if (outbound.from_bot_id === bot.id) continue;
+      const authorName = senderDisplayName(team, outbound.from_bot_id);
+      const reply = extractReplyFor(paneText, ch.name, authorName, outbound.text);
       if (!reply) continue;
       if (alreadyHas(ch, bot.id, reply)) continue;
       const message = store.postToChannel(ch.id, bot.id, reply);
@@ -131,9 +132,35 @@ export async function syncChannelReplies(channel: string): Promise<{ channel: Ch
   return { channel: store.findChannel(store.resumeDefaultTeam(), channel), added };
 }
 
+export function senderDisplayName(team: Team, fromId: string): string {
+  if (fromId === USER_ID) return USER_DISPLAY_NAME;
+  return team.members.find((b) => b.id === fromId)?.name ?? fromId;
+}
+
 export function threadLines(team: Team, ch: Channel): string[] {
-  return ch.messages.map((m) => {
-    const name = team.members.find((b) => b.id === m.from_bot_id)?.name ?? m.from_bot_id;
-    return `${name}: ${m.text}`;
-  });
+  return ch.messages.map((m) => `${senderDisplayName(team, m.from_bot_id)}: ${m.text}`);
+}
+
+export async function syncDmReplies(botIdOrName: string): Promise<{ added: SyncedReply[] }> {
+  const team = store.resumeDefaultTeam();
+  const bot = store.findBot(team, botIdOrName);
+  const added: SyncedReply[] = [];
+  let paneText = "";
+  try {
+    paneText = await reader(agentSlug(bot));
+  } catch {
+    return { added };
+  }
+  if (!paneText.trim()) return { added };
+
+  const outbounds = store.getDm(bot.id).filter((m) => m.from_bot_id === USER_ID);
+  for (const outbound of outbounds) {
+    const reply = extractReplyFor(paneText, "dm", USER_DISPLAY_NAME, outbound.text);
+    if (!reply) continue;
+    const current = store.getDm(bot.id);
+    if (current.some((m) => m.from_bot_id === bot.id && m.text === reply)) continue;
+    const message = store.postToDm(bot.id, bot.id, reply);
+    added.push({ from: bot.name, text: reply, message });
+  }
+  return { added };
 }

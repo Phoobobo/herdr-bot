@@ -2,8 +2,8 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createChannel, postToChannel, resumeDefaultTeam } from "./store.ts";
-import { extractReplyFor, setPaneReader, syncChannelReplies, threadLines } from "./thread.ts";
+import { createChannel, getDm, postToChannel, postToDm, resumeDefaultTeam } from "./store.ts";
+import { extractReplyFor, setPaneReader, syncChannelReplies, syncDmReplies, threadLines } from "./thread.ts";
 
 const ENG = `
  [#standup] 幕僚长: herdr-bot ping: reply in this pane.
@@ -79,4 +79,38 @@ test("sync is idempotent", async () => {
   const again = await syncChannelReplies("standup");
   expect(again.added).toEqual([]);
   expect(again.channel.messages).toHaveLength(4);
+});
+
+test("syncDmReplies pulls the bot reply after a user DM", async () => {
+  const pane = `
+ [dm] Phoobobo: ping
+
+ Planning reply
+
+ pong from lead
+`;
+  setPaneReader(async (slug) => (slug === "lead" ? pane : ""));
+  resumeDefaultTeam();
+  postToDm("lead", "user", "ping");
+  const { added } = await syncDmReplies("lead");
+  expect(added.map((a) => a.text)).toEqual(["pong from lead"]);
+  const dm = getDm("lead");
+  expect(dm.map((m) => `${m.from_bot_id}: ${m.text}`)).toEqual(["user: ping", "lead: pong from lead"]);
+});
+
+test("user channel posts are outbound for sync", async () => {
+  const eng = `
+ [#standup] Phoobobo: hello everyone
+
+ Preparing acknowledgment reply
+
+ 收到
+`;
+  setPaneReader(async (slug) => (slug === "eng" ? eng : ""));
+  resumeDefaultTeam();
+  createChannel({ name: "standup" });
+  postToChannel("standup", "user", "hello everyone");
+  const { added } = await syncChannelReplies("standup");
+  expect(added.map((a) => a.from)).toContain("研发工程师");
+  expect(added.find((a) => a.from === "研发工程师")?.text).toBe("收到");
 });

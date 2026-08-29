@@ -104,21 +104,7 @@ herdr-bots bots body 研发工程师 --body claude
 
 ## Overlay TUI
 
-Keyboard-driven first slice (not a full Grok GUI clone):
-
-- **Header** — team + session name
-- **Left** — bots, then channels
-- **Main** — selected bot (name / tag / description / body) or channel messages
-
-| key | action |
-| --- | ------ |
-| `j` / `k` | move |
-| `n` | new bot |
-| `c` | new channel |
-| `e` / `t` / `d` / `b` | edit name / tag / description / body |
-| `m` | post to the selected channel (bots can talk to each other here) |
-| `?` | help |
-| `q` / `esc` | quit (closes the overlay) |
+The overlay is the Grok Bot layout: a dark sidebar of bots then channels, a main pane that is always a conversation (1:1 DM with a bot, or a #channel thread), and a bottom composer. Type to send, arrows or click to switch, `i` for details (tag / body / description), `q` or Esc to quit. Empty `n` / `c` still create a bot or channel; those letters type into the composer once it has text.
 
 ## CLI
 
@@ -165,10 +151,10 @@ herdr-bots bots live --json        # QA: names must be the four, each live
 herdr-bots bots open 研发工程师 --json
 ```
 
-`herdr plugin action invoke phoobobo.herdr-bot.open-bot` with `--name` also works. Enter in the overlay TUI opens the selected bot.
+`herdr plugin action invoke phoobobo.herdr-bot.open-bot` with `--name` also works. The first composer send to a bot opens it if it is not live, then prompts that agent.
 
 
-`channel post` writes the overlay log **and** `herdr agent prompt`s every other live member of that channel (not the sender), so the receiving body wakes in its pane and can reply. 1:1 and @mention are out of scope.
+`channel post` writes the overlay log **and** `herdr agent prompt`s every other live member of that channel (not the sender), so the receiving body wakes in its pane and can reply. Composer sends in a 1:1 persist under `team.dms[botId]` and prompt that bot; a channel send from the user prompts every live member.
 
 ```bash
 herdr-bots channel create --name standup --json

@@ -7,7 +7,10 @@ import {
   BotError,
   DEFAULT_MEMBER_NAMES,
   DEFAULT_SESSION,
+  USER_DISPLAY_NAME,
+  USER_ID,
   type Bot,
+  type ChannelMessage,
   type Team,
 } from "./types.ts";
 
@@ -259,6 +262,10 @@ export function formatChannelPrompt(channel: string, fromName: string, text: str
   return `[#${channel}] ${fromName}: ${text}`;
 }
 
+export function formatDmPrompt(text: string): string {
+  return `[dm] ${USER_DISPLAY_NAME}: ${text}`;
+}
+
 export async function deliverChannelPost(
   channel: string,
   fromIdOrName: string,
@@ -266,14 +273,14 @@ export async function deliverChannelPost(
 ): Promise<{ delivered: LiveMember[]; skipped: Array<LiveMember & { reason?: string }> }> {
   const team = store.resumeDefaultTeam();
   const ch = store.findChannel(team, channel);
-  const from = store.findBot(team, fromIdOrName);
+  const from = store.resolveFrom(team, fromIdOrName);
   const agents = await agentList();
   const panes = await paneList();
   const prompt = formatChannelPrompt(ch.name, from.name, text);
   const delivered: LiveMember[] = [];
   const skipped: Array<LiveMember & { reason?: string }> = [];
   for (const id of ch.member_ids) {
-    if (id === from.id) continue;
+    if (from.id !== USER_ID && id === from.id) continue;
     const bot = team.members.find((b) => b.id === id);
     if (!bot) continue;
     const live = findLive(bot, agents, panes);
@@ -297,6 +304,33 @@ export async function deliverChannelPost(
     }
   }
   return { delivered, skipped };
+}
+
+export async function deliverDmPost(botIdOrName: string, text: string): Promise<Bot> {
+  const bot = await openBot(botIdOrName);
+  await herdrJson(["agent", "prompt", agentSlug(bot), formatDmPrompt(text)]);
+  return bot;
+}
+
+export async function sendComposer(
+  sel: { kind: "bot" | "channel"; index: number },
+  text: string,
+): Promise<ChannelMessage | null> {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  const team = store.resumeDefaultTeam();
+  if (sel.kind === "bot") {
+    const bot = team.members[sel.index];
+    if (!bot) throw new BotError("BOT_NOT_FOUND", "no bot selected");
+    const msg = store.postToDm(bot.id, USER_ID, trimmed);
+    await deliverDmPost(bot.id, trimmed);
+    return msg;
+  }
+  const ch = team.channels[sel.index];
+  if (!ch) throw new BotError("CHANNEL_NOT_FOUND", "no channel selected");
+  const msg = store.postToChannel(ch.id, USER_ID, trimmed);
+  await deliverChannelPost(ch.id, USER_ID, trimmed);
+  return msg;
 }
 
 export { DEFAULT_SESSION, WORKSPACE_LABEL };

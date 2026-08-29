@@ -20,6 +20,17 @@ export const SGR = {
   gray: "\x1b[38;5;245m",
   lilac: "\x1b[38;5;140m",
   headerBg: "\x1b[48;5;236m",
+  bg: "\x1b[48;5;235m",
+  sidebarBg: "\x1b[48;5;236m",
+  selectedBg: "\x1b[48;5;24m",
+  composerBg: "\x1b[48;5;237m",
+  app: "\x1b[48;5;235m\x1b[38;5;252m",
+  sidebar: "\x1b[48;5;236m\x1b[38;5;252m",
+  sidebarDim: "\x1b[48;5;236m\x1b[38;5;245m",
+  selected: "\x1b[48;5;24m\x1b[38;5;252m",
+  composer: "\x1b[48;5;237m\x1b[38;5;252m",
+  composerDim: "\x1b[48;5;237m\x1b[38;5;245m",
+  header: "\x1b[48;5;235m\x1b[1;38;5;252m",
 };
 
 const hasBunWidth = typeof Bun !== "undefined" && typeof Bun.stringWidth === "function";

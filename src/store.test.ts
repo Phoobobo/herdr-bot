@@ -3,12 +3,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DEFAULT_MEMBER_NAMES, DEFAULT_SEED_BOTS } from "./types.ts";
+import { USER_DISPLAY_NAME, USER_ID } from "./types.ts";
 import {
   createBot,
   createChannel,
+  getDm,
   loadOrSeedDefaultTeam,
   memberNames,
   postToChannel,
+  postToDm,
   renameBot,
   resumeDefaultTeam,
   setBotBody,
@@ -103,4 +106,39 @@ test("set body to omp must persist as omp, not fall back to pi", () => {
   const found = reloaded.members.find((b) => b.id === eng.id)!;
   expect(found.body).toBe("omp");
   expect(found.body).not.toBe("pi");
+});
+
+test("postToDm user→bot persists across reload", () => {
+  resumeDefaultTeam();
+  const msg = postToDm("lead", "user", "hello 幕僚长");
+  expect(msg.from_bot_id).toBe(USER_ID);
+  expect(msg.text).toBe("hello 幕僚长");
+  const first = getDm("lead");
+  expect(first).toHaveLength(1);
+  expect(first[0].from_bot_id).toBe("user");
+  const reloaded = loadOrSeedDefaultTeam();
+  const kept = getDm(reloaded, "lead");
+  expect(kept).toHaveLength(1);
+  expect(kept[0].text).toBe("hello 幕僚长");
+  expect(kept[0].from_bot_id).toBe(USER_ID);
+});
+
+test("postToChannel from user works", () => {
+  resumeDefaultTeam();
+  createChannel({ name: "standup" });
+  const msg = postToChannel("standup", USER_DISPLAY_NAME, "hi from me");
+  expect(msg.from_bot_id).toBe(USER_ID);
+  const reloaded = loadOrSeedDefaultTeam();
+  expect(reloaded.channels[0].messages[0].from_bot_id).toBe("user");
+  expect(reloaded.channels[0].messages[0].text).toBe("hi from me");
+});
+
+test("postToChannel from lead still works", () => {
+  resumeDefaultTeam();
+  createChannel({ name: "standup" });
+  const msg = postToChannel("standup", "lead", "hello team");
+  expect(msg.from_bot_id).toBe("lead");
+  const reloaded = loadOrSeedDefaultTeam();
+  expect(reloaded.channels[0].messages[0].from_bot_id).toBe("lead");
+  expect(reloaded.channels[0].messages[0].text).toBe("hello team");
 });
