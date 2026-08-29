@@ -2,7 +2,7 @@
 
 import { openDefaultOverlay } from "./actions.ts";
 import * as store from "./store.ts";
-import { ensureTeamLive, listLiveBots, openBot } from "./spawn.ts";
+import { deliverChannelPost, ensureTeamLive, listLiveBots, openBot } from "./spawn.ts";
 import { listInstalledBodiesSync, resolveBody } from "./integrations.ts";
 import { BotError, type Team } from "./types.ts";
 
@@ -245,7 +245,8 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
           throw new BotError("BAD_REQUEST", "usage: herdr-bots channel post <channel> --from <bot> --text <text>");
         }
         const message = store.postToChannel(channel, from, text);
-        writeJson({ ok: true, message });
+        const delivery = await deliverChannelPost(channel, from, text);
+        writeJson({ ok: true, message, delivery });
         return 0;
       }
       throw new BotError("BAD_REQUEST", "usage: herdr-bots channel create|post|list");

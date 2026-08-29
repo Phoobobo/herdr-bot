@@ -2,7 +2,7 @@
 // Keys: j/k select, n new bot, c new channel, e edit, q quit.
 
 import * as store from "./store.ts";
-import { openBot } from "./spawn.ts";
+import { deliverChannelPost, openBot } from "./spawn.ts";
 import type { Bot, Channel, Team } from "./types.ts";
 import { DEFAULT_BODY } from "./types.ts";
 import { InputParser, SGR, Screen, truncate, type InputEvent } from "./ui.ts";
@@ -215,6 +215,15 @@ function handleNormal(ev: InputEvent): void {
     prompt(`post as (bot id/name)`, (from) => {
       prompt("message", (text) => {
         store.postToChannel(ch.id, from, text);
+        status = "delivering...";
+        void deliverChannelPost(ch.id, from, text)
+          .then((d) => {
+            status = `delivered ${d.delivered.length} live pane(s)`;
+            reload();
+          })
+          .catch((err) => {
+            status = err instanceof Error ? err.message : String(err);
+          });
       });
     });
   }

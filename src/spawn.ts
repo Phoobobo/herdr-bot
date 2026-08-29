@@ -255,4 +255,48 @@ export function liveGate(members: LiveMember[]): string[] {
   return names;
 }
 
+export function formatChannelPrompt(channel: string, fromName: string, text: string): string {
+  return `[#${channel}] ${fromName}: ${text}`;
+}
+
+export async function deliverChannelPost(
+  channel: string,
+  fromIdOrName: string,
+  text: string,
+): Promise<{ delivered: LiveMember[]; skipped: Array<LiveMember & { reason?: string }> }> {
+  const team = store.resumeDefaultTeam();
+  const ch = store.findChannel(team, channel);
+  const from = store.findBot(team, fromIdOrName);
+  const agents = await agentList();
+  const panes = await paneList();
+  const prompt = formatChannelPrompt(ch.name, from.name, text);
+  const delivered: LiveMember[] = [];
+  const skipped: Array<LiveMember & { reason?: string }> = [];
+  for (const id of ch.member_ids) {
+    if (id === from.id) continue;
+    const bot = team.members.find((b) => b.id === id);
+    if (!bot) continue;
+    const live = findLive(bot, agents, panes);
+    const row: LiveMember = {
+      name: bot.name,
+      slug: agentSlug(bot),
+      body: bot.body,
+      pane_id: live?.pane_id ?? bot.pane_id ?? null,
+      status: live?.status ?? null,
+      live: !!live,
+    };
+    if (!live) {
+      skipped.push({ ...row, reason: "not live" });
+      continue;
+    }
+    try {
+      await herdrJson(["agent", "prompt", agentSlug(bot), prompt]);
+      delivered.push(row);
+    } catch (err) {
+      skipped.push({ ...row, reason: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  return { delivered, skipped };
+}
+
 export { DEFAULT_SESSION, WORKSPACE_LABEL };

@@ -156,3 +156,11 @@ herdr-bots bots open 研发工程师 --json
 ```
 
 `herdr plugin action invoke phoobobo.herdr-bot.open-bot` with `--name` also works. Enter in the overlay TUI opens the selected bot.
+
+
+`channel post` writes the overlay log **and** `herdr agent prompt`s every other live member of that channel (not the sender), so the receiving body wakes in its pane and can reply. 1:1 and @mention are out of scope.
+
+```bash
+herdr-bots channel create --name standup --json
+herdr-bots channel post standup --from 幕僚长 --text "hello team" --json
+```

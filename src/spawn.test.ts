@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { DEFAULT_MEMBER_NAMES } from "./types.ts";
 import { resumeDefaultTeam } from "./store.ts";
-import { agentSlug, ensureTeamLive, listLiveBots, openBot, setHerdrRunner } from "./spawn.ts";
+import { agentSlug, deliverChannelPost, ensureTeamLive, formatChannelPrompt, listLiveBots, openBot, setHerdrRunner } from "./spawn.ts";
+import { createChannel, postToChannel } from "./store.ts";
 
 let dir: string;
 let calls: string[][];
@@ -73,6 +74,9 @@ beforeEach(() => {
       }
       return ok({ name, pane_id: pane });
     }
+    if (args[0] === "agent" && args[1] === "prompt") {
+      return ok({ prompted: args[2] });
+    }
     if (args[0] === "pane" && (args[1] === "rename" || args[1] === "report-metadata" || args[1] === "focus")) {
       if (args[1] === "rename") {
         const p = panes.find((x) => x.pane_id === args[2]);
@@ -118,4 +122,18 @@ test("openBot is idempotent and does not double-start", async () => {
   expect(after).toBe(before);
   const live = await listLiveBots();
   expect(live.find((m) => m.name === "研发工程师")?.live).toBe(true);
+});
+
+test("channel post prompts every live member except the sender", async () => {
+  await ensureTeamLive();
+  createChannel({ name: "standup" });
+  postToChannel("standup", "lead", "hello team");
+  const result = await deliverChannelPost("standup", "lead", "hello team");
+  expect(result.delivered.map((m) => m.name)).toEqual(["研发工程师", "研究员", "测试工程师"]);
+  expect(result.skipped).toEqual([]);
+  const prompts = calls.filter((c) => c[0] === "agent" && c[1] === "prompt");
+  expect(prompts.map((c) => c[2])).toEqual(["eng", "research", "qa"]);
+  const text = formatChannelPrompt("standup", "幕僚长", "hello team");
+  expect(prompts.every((c) => c[3] === text)).toBe(true);
+  expect(prompts.some((c) => c[2] === "lead")).toBe(false);
 });
