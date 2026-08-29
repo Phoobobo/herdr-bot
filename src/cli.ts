@@ -155,7 +155,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
           name,
           tag: flag(argv, "tag"),
           description: flag(argv, "description") || flag(argv, "desc"),
-          body: flag(argv, "body") || "pi",
+          body: resolveBody(flag(argv, "body")),
         });
         writeJson({ ok: true, bot });
         return 0;
@@ -188,7 +188,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         const target = pos[0];
         const body = flag(argv, "body") || pos[1];
         if (!target || !body) throw new BotError("BAD_REQUEST", "usage: herdr-bots bots body <id|name> --body <harness>");
-        const bot = store.setBody(target, body);
+        const bot = store.setBody(target, resolveBody(body));
         writeJson({ ok: true, bot });
         return 0;
       }

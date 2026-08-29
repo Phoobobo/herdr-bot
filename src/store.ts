@@ -5,6 +5,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { resolveBody } from "./integrations.ts";
 import {
   BotError,
   DEFAULT_BODY,
@@ -190,7 +191,7 @@ export function createBot(teamOrInput: Team | BotInput, input?: BotInput): Bot {
     name,
     tag: (spec.tag ?? "bot").trim() || "bot",
     description: spec.description ?? "",
-    body: spec.body?.trim() || DEFAULT_BODY,
+    body: resolveBody(spec.body),
     created_at: t,
     updated_at: t,
   };
@@ -251,7 +252,9 @@ export function setBody(team: Team, name: string, body: string): Bot;
 export function setBody(teamOrName: Team | string, nameOrBody: string, body?: string): Bot {
   const team = typeof teamOrName === "string" ? loadState() : syncAliases(teamOrName);
   const id = typeof teamOrName === "string" ? teamOrName : nameOrBody;
-  const value = (typeof teamOrName === "string" ? nameOrBody : body ?? "").trim() || DEFAULT_BODY;
+  const raw = (typeof teamOrName === "string" ? nameOrBody : body ?? "").trim();
+  if (!raw) throw new BotError("BAD_REQUEST", "body is required");
+  const value = resolveBody(raw);
   const bot = findBot(team, id);
   bot.body = value;
   bot.updated_at = now();

@@ -64,7 +64,8 @@ test("resume --no-open seeds without opening a TUI", () => {
 });
 
 test("CLI create / rename / tag / description / body / channel --json", () => {
-  expect(cli("bots", "create", "--name", "观察员", "--tag", "watch", "--body", "omp", "--json").exitCode).toBe(0);
+  const created = json(cli("bots", "create", "--name", "观察员", "--tag", "watch", "--body", "omp", "--json"));
+  expect(created.bot.body).toBe("omp");
   expect(json(cli("bots", "rename", "观察员", "--name", "值班观察员", "--json")).bot.name).toBe("值班观察员");
   expect(json(cli("bots", "tag", "值班观察员", "--tag", "duty", "--json")).bot.tag).toBe("duty");
   expect(json(cli("bots", "description", "值班观察员", "--description", "on duty", "--json")).bot.description).toBe("on duty");
@@ -79,4 +80,13 @@ test("CLI uses nonzero exits and JSON error codes", () => {
   const missing = cli("bots", "rename", "no-such-bot", "--name", "x", "--json");
   expect(missing.exitCode).toBe(3);
   expect(json(missing).error.code).toBe("BOT_NOT_FOUND");
+});
+
+test("CLI set body to omp stays omp after reload", () => {
+  const set = cli("bots", "body", "研发工程师", "--body", "omp", "--json");
+  expect(set.exitCode).toBe(0);
+  expect(json(set).bot.body).toBe("omp");
+  const listed = json(cli("bots", "list", "--json"));
+  const eng = listed.bots.find((b: { name: string }) => b.name === "研发工程师");
+  expect(eng.body).toBe("omp");
 });

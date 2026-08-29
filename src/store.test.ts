@@ -92,3 +92,15 @@ test("create / rename / tag / description / body / channel round-trip", () => {
   expect(reloaded.channels[0].messages[0].text).toBe("hello team");
   expect(memberNames(reloaded).slice(0, 4)).toEqual([...DEFAULT_MEMBER_NAMES]);
 });
+
+test("set body to omp must persist as omp, not fall back to pi", () => {
+  const team = resumeDefaultTeam();
+  const eng = team.members.find((b) => b.name === "研发工程师")!;
+  expect(eng.body).toBe("pi");
+  const updated = setBotBody(eng.id, "omp");
+  expect(updated.body).toBe("omp");
+  const reloaded = loadOrSeedDefaultTeam();
+  const found = reloaded.members.find((b) => b.id === eng.id)!;
+  expect(found.body).toBe("omp");
+  expect(found.body).not.toBe("pi");
+});
