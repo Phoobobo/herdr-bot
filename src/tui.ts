@@ -2,6 +2,7 @@
 // Keys: j/k select, n new bot, c new channel, e edit, q quit.
 
 import * as store from "./store.ts";
+import { openBot } from "./spawn.ts";
 import type { Bot, Channel, Team } from "./types.ts";
 import { DEFAULT_BODY } from "./types.ts";
 import { InputParser, SGR, Screen, truncate, type InputEvent } from "./ui.ts";
@@ -17,7 +18,7 @@ type Mode =
 let team: Team = store.resumeDefaultTeam();
 let sel: Sel = { kind: "bot", index: 0 };
 let mode: Mode = { kind: "normal" };
-let status = "j/k select   n new bot   c new channel   e edit   t tag   d desc   b body   m post   q quit";
+let status = "j/k select   enter open   n new bot   c new channel   e edit   t tag   d desc   b body   m post   q quit";
 let running = true;
 
 function reload(): void {
@@ -152,6 +153,20 @@ function handleNormal(ev: InputEvent): void {
   }
   if (ev.type === "key" && ev.name === "down") move(1);
   if (ev.type === "key" && ev.name === "up") move(-1);
+  if (ev.type === "key" && ev.name === "enter") {
+    const bot = selectedBot();
+    if (!bot) return;
+    status = `starting ${bot.name} (${bot.body})...`;
+    void openBot(bot.id)
+      .then(() => {
+        status = `${bot.name} live`;
+        reload();
+      })
+      .catch((err) => {
+        status = err instanceof Error ? err.message : String(err);
+      });
+    return;
+  }
   if (ev.type !== "char") return;
   const k = ev.ch;
   if (k === "q") {

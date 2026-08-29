@@ -52,3 +52,9 @@ id = "tui"
 title = "herdr-bot"
 placement = "overlay"
 command = ["bun", "run", "src/tui.ts"]
+
+[[actions]]
+id = "open-bot"
+title = "Open bot harness"
+contexts = ["global", "workspace"]
+command = ["bun", "run", "src/actions.ts", "open-bot"]

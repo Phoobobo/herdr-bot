@@ -2,6 +2,7 @@
 
 import { openDefaultOverlay } from "./actions.ts";
 import * as store from "./store.ts";
+import { ensureTeamLive, listLiveBots, openBot } from "./spawn.ts";
 import { listInstalledBodiesSync, resolveBody } from "./integrations.ts";
 import { BotError, type Team } from "./types.ts";
 
@@ -19,7 +20,10 @@ Usage:
   herdr-bots bots tag <id|name> --tag <tag>
   herdr-bots bots description <id|name> --description <text>
   herdr-bots bots body <id|name> --body <harness>
-  herdr-bots bot create|rename|tag|description|body   (alias of bots *)
+  herdr-bots bots open <id|name> [--json]
+  herdr-bots bots up [--json]
+  herdr-bots bots live --json
+  herdr-bots bot create|rename|tag|description|body|open   (alias of bots *)
   herdr-bots channel create --name <name>
   herdr-bots channel post <channel> --from <bot> --text <text>
   herdr-bots bodies list --json
@@ -192,7 +196,30 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         writeJson({ ok: true, bot });
         return 0;
       }
-      throw new BotError("BAD_REQUEST", "usage: herdr-bots bots list|create|rename|tag|description|body");
+      if (sub === "open") {
+        const target = pos[0] || flag(argv, "name");
+        if (!target) throw new BotError("BAD_REQUEST", "usage: herdr-bots bots open <id|name>");
+        const bot = await openBot(target);
+        writeJson({ ok: true, bot });
+        return 0;
+      }
+      if (sub === "up") {
+        const members = await ensureTeamLive();
+        writeJson({ ok: true, session: "default", members, names: members.map((m) => m.name) });
+        return 0;
+      }
+      if (sub === "live") {
+        const members = await listLiveBots();
+        writeJson({
+          ok: true,
+          session: "default",
+          members,
+          names: members.filter((m) => m.live).map((m) => m.name),
+          live: members.every((m) => m.live),
+        });
+        return 0;
+      }
+      throw new BotError("BAD_REQUEST", "usage: herdr-bots bots list|create|rename|tag|description|body|open|up|live");
     }
 
     if (cmd === "channel") {

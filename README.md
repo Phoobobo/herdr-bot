@@ -143,3 +143,16 @@ bun test
 ## License
 
 Use it. No secrets belong in this repo.
+
+
+## Live harnesses
+
+Open a bot to start its `body` as a Herdr agent in the **default session**, inside a dedicated `herdr-bots` workspace (one tab per bot). Agent names are the bot ids (`lead`, `eng`, `research`, `qa`) because Herdr requires `[a-z][a-z0-9_-]{0,31}`.
+
+```bash
+herdr-bots bots up --json          # ensure the four default members are live
+herdr-bots bots live --json        # QA: names must be the four, each live
+herdr-bots bots open 研发工程师 --json
+```
+
+`herdr plugin action invoke phoobobo.herdr-bot.open-bot` with `--name` also works. Enter in the overlay TUI opens the selected bot.

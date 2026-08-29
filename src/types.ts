@@ -13,6 +13,8 @@ export interface Bot {
   tag: string;
   description: string;
   body: string;
+  pane_id?: string | null;
+  agent_name?: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -43,6 +45,7 @@ export interface Team {
   members: Bot[];
   bots: Bot[];
   channels: Channel[];
+  workspace_id?: string | null;
   created_at: number;
   updated_at: number;
 }

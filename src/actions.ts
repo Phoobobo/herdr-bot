@@ -5,6 +5,7 @@ import { DEFAULT_SESSION, PLUGIN_ID, runHerdr } from "./herdr.ts";
 import * as store from "./store.ts";
 import { resolveBody } from "./integrations.ts";
 import { BotError } from "./types.ts";
+import { openBot } from "./spawn.ts";
 
 function actionId(): string {
   return (process.env.HERDR_PLUGIN_ACTION_ID || process.argv[2] || "").trim();
@@ -115,6 +116,12 @@ export async function dispatch(id: string, args: string[]): Promise<void> {
       const name = flag(args, "name") || pos[0];
       if (!name) throw new BotError("BAD_REQUEST", "create-channel requires --name <name>");
       store.createChannel(name);
+      return;
+    }
+    case "open-bot": {
+      const name = flag(args, "name") || pos[0];
+      if (!name) throw new BotError("BAD_REQUEST", "open-bot requires --name <id|name>");
+      await openBot(name);
       return;
     }
     default:
