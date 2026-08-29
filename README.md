@@ -36,38 +36,48 @@ herdr plugin link /path/to/herdr-bot
 cd /path/to/herdr-bot
 bun install
 bun link                 # puts `herdr-bots` on PATH
+# plugin dispatcher so `herdr bots` works without a zsh function:
+export PATH="$HOME/Workspace/herdr-bot/bin:$PATH"
 ```
 
 GitHub topic: **`herdr-plugin`** (required for the herdr marketplace index).
 
 ## How `herdr bots` works
 
-Herdr 0.8.2 has **no plugin CLI subcommands**, so `herdr bots` is not a native herdr command. This plugin implements the product command as three equivalent entrypoints:
+The product command is **`herdr bots`**. Herdr 0.8.2 has **no plugin CLI subcommands**, so this plugin ships its own `bin/herdr` dispatcher (git-style, from the plugin side — it does not patch herdr or replace `~/.local/bin/herdr`, which `herdr update` would clobber).
 
-1. **Plugin action** (from inside herdr, or scripts):
+- `herdr bots …` → sibling `herdr-bots` (resume default team + overlay; `--no-open` / `--json` / subcommands work)
+- any other args → the official `herdr` found later on PATH (the dispatcher directory is skipped so it does not recurse)
 
-   ```bash
-   herdr plugin action invoke phoobobo.herdr-bot.bots
-   ```
+Put the plugin bin **first** on PATH so a new login pane (macOS Herdr panes are login shells) finds the dispatcher instead of `~/.local/bin/herdr`:
 
-   This resumes the default team and opens the overlay TUI.
+```bash
+export PATH="$HOME/Workspace/herdr-bot/bin:$PATH"
+```
 
-2. **CLI binary** `herdr-bots` (like workboard's `herdr-workboard`):
+Local install/link should prepend that directory in `~/.zprofile` (after the `~/.local/bin` line, which would otherwise shadow it), `~/.zshenv` (non-login zsh), and `~/.zshrc`. Then:
 
-   ```bash
-   herdr-bots                 # resume default team + open overlay
-   herdr-bots bots list --json
-   herdr-bots team show --json
-   ```
+```bash
+herdr bots                    # resume default team + open overlay
+herdr bots --no-open --json   # QA: members must be the four default names
+herdr session list            # still official herdr
+```
 
-3. **Shell shim** so you can type `herdr bots` without wrapping `/Users/phoobobo/.local/bin/herdr` (a wrapper there would be clobbered by `herdr update`):
+`herdr-bots` remains the direct CLI (like workboard's `herdr-workboard`):
 
-   ```bash
-   source /path/to/herdr-bot/shell/herdr.zsh
-   herdr bots
-   ```
+```bash
+herdr-bots                 # resume default team + open overlay
+herdr-bots bots list --json
+herdr-bots team show --json
+```
 
-   `scripts/herdr-bots.sh` is the same CLI via bun if `herdr-bots` is not on PATH.
+Plugin action `phoobobo.herdr-bot.bots` remains valid from inside herdr or scripts:
+
+```bash
+herdr plugin action invoke phoobobo.herdr-bot.bots
+```
+
+`shell/herdr.zsh` is an optional fallback if the plugin bin is not first on PATH. `scripts/herdr-bots.sh` is the same CLI via bun if `herdr-bots` is not on PATH.
 
 Open the overlay directly:
 

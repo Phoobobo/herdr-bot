@@ -63,6 +63,22 @@ test("resume --no-open seeds without opening a TUI", () => {
   expect(body.team.members).toEqual([...DEFAULT_MEMBER_NAMES]);
 });
 
+test("herdr-bots with no args / bots still resume", () => {
+  const bare = cli("--no-open", "--json");
+  expect(bare.exitCode).toBe(0);
+  const bareBody = json(bare);
+  expect(bareBody.ok).toBe(true);
+  expect(bareBody.opened).toBe(false);
+  expect(bareBody.members).toEqual([...DEFAULT_MEMBER_NAMES]);
+
+  const bots = cli("bots", "--no-open", "--json");
+  expect(bots.exitCode).toBe(0);
+  const botsBody = json(bots);
+  expect(botsBody.ok).toBe(true);
+  expect(botsBody.opened).toBe(false);
+  expect(botsBody.members).toEqual([...DEFAULT_MEMBER_NAMES]);
+});
+
 test("CLI create / rename / tag / description / body / channel --json", () => {
   const created = json(cli("bots", "create", "--name", "观察员", "--tag", "watch", "--body", "omp", "--json"));
   expect(created.bot.body).toBe("omp");

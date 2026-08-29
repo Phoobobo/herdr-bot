@@ -1,0 +1,24 @@
+#!/bin/sh
+# herdr-bot dispatcher. `herdr bots` -> herdr-bots. Everything else -> official herdr.
+# Lives in the plugin bin/; do not install over ~/.local/bin/herdr.
+set -eu
+bindir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+if [ "${1-}" = "bots" ]; then
+  shift
+  if [ -x "$bindir/herdr-bots" ]; then
+    exec "$bindir/herdr-bots" "$@"
+  fi
+  exec herdr-bots "$@"
+fi
+OLDIFS=$IFS
+IFS=:
+for d in $PATH; do
+  [ "$d" = "$bindir" ] && continue
+  if [ -n "$d" ] && [ -x "$d/herdr" ]; then
+    IFS=$OLDIFS
+    exec "$d/herdr" "$@"
+  fi
+done
+IFS=$OLDIFS
+echo "herdr: official binary not found on PATH" >&2
+exit 127

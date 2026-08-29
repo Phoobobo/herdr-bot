@@ -1,8 +1,10 @@
 # herdr-bot: map the product command `herdr bots` onto `herdr-bots`.
 #
-# Herdr 0.8.x has no plugin CLI subcommands, and wrapping ~/.local/bin/herdr
-# would be clobbered by `herdr update`. This function is the non-destructive
-# shim: source it from ~/.zshrc. It does not replace the herdr binary.
+# Primary entry is bin/herdr on PATH (plugin dispatcher). This function is a
+# fallback if the plugin bin is not first on PATH. Herdr 0.8.x has no plugin
+# CLI subcommands, and wrapping ~/.local/bin/herdr would be clobbered by
+# `herdr update`. Source this from ~/.zshrc only as a fallback. It does not
+# replace the herdr binary.
 herdr() {
   if [[ "${1:-}" == "bots" ]]; then
     shift
