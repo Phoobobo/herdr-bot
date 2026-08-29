@@ -3,6 +3,7 @@
 import { openDefaultOverlay } from "./actions.ts";
 import * as store from "./store.ts";
 import { deliverChannelPost, ensureTeamLive, listLiveBots, openBot } from "./spawn.ts";
+import { syncChannelReplies, threadLines } from "./thread.ts";
 import { listInstalledBodiesSync, resolveBody } from "./integrations.ts";
 import { BotError, type Team } from "./types.ts";
 
@@ -26,6 +27,8 @@ Usage:
   herdr-bots bot create|rename|tag|description|body|open   (alias of bots *)
   herdr-bots channel create --name <name>
   herdr-bots channel post <channel> --from <bot> --text <text>
+  herdr-bots channel sync <channel> [--json]
+  herdr-bots channel show <channel> [--json]
   herdr-bots bodies list --json
 `;
 }
@@ -249,7 +252,19 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         writeJson({ ok: true, message, delivery });
         return 0;
       }
-      throw new BotError("BAD_REQUEST", "usage: herdr-bots channel create|post|list");
+      if (sub === "sync" || sub === "show") {
+        const channel = pos[0] || flag(argv, "name");
+        if (!channel) throw new BotError("BAD_REQUEST", "usage: herdr-bots channel sync <channel>");
+        const { channel: ch, added } = await syncChannelReplies(channel);
+        writeJson({
+          ok: true,
+          channel: ch,
+          added,
+          thread: threadLines(team, ch),
+        });
+        return 0;
+      }
+      throw new BotError("BAD_REQUEST", "usage: herdr-bots channel create|post|list|sync|show");
     }
 
     throw new BotError("BAD_REQUEST", usage());

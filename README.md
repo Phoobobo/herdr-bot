@@ -164,3 +164,5 @@ herdr-bots bots open 研发工程师 --json
 herdr-bots channel create --name standup --json
 herdr-bots channel post standup --from 幕僚长 --text "hello team" --json
 ```
+
+`herdr-bots channel sync standup` reads each live pane and writes replies back into the overlay thread so #standup matches eng / research / qa.

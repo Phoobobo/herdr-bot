@@ -3,6 +3,7 @@
 
 import * as store from "./store.ts";
 import { deliverChannelPost, openBot } from "./spawn.ts";
+import { syncChannelReplies } from "./thread.ts";
 import type { Bot, Channel, Team } from "./types.ts";
 import { DEFAULT_BODY } from "./types.ts";
 import { InputParser, SGR, Screen, truncate, type InputEvent } from "./ui.ts";
@@ -135,6 +136,23 @@ function handlePrompt(ev: InputEvent): void {
   if (ev.type === "paste") mode.value += ev.text;
 }
 
+function syncSelectedChannel(): void {
+  if (sel.kind !== "channel") return;
+  const ch = team.channels[sel.index];
+  if (!ch) return;
+  status = "syncing replies...";
+  void syncChannelReplies(ch.id)
+    .then((r) => {
+      status = r.added.length ? `synced ${r.added.length} repl${r.added.length === 1 ? "y" : "ies"}` : "thread up to date";
+      team = store.loadOrSeedDefaultTeam();
+      paint();
+    })
+    .catch((err) => {
+      status = err instanceof Error ? err.message : String(err);
+      paint();
+    });
+}
+
 function move(delta: number): void {
   const items: Sel[] = [
     ...team.members.map((_, i) => ({ kind: "bot" as const, index: i })),
@@ -144,6 +162,7 @@ function move(delta: number): void {
   const cur = items.findIndex((it) => it.kind === sel.kind && it.index === sel.index);
   const next = (cur + delta + items.length) % items.length;
   sel = items[next];
+  if (sel.kind === "channel") syncSelectedChannel();
 }
 
 function handleNormal(ev: InputEvent): void {
