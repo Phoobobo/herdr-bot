@@ -142,8 +142,20 @@ test("identitySystemPrompt includes name, tag, and description", () => {
     expect(prompt).toContain(seed.description);
   }
   expect(identitySystemPrompt(DEFAULT_SEED_BOTS[0])).toBe(
-    "You are 幕僚长 (lead). 管理你的其他 Bot，需要决策时找你",
+    "Your name is 幕僚长. Your tag is lead. Role: 管理你的其他 Bot，需要决策时找你 When asked who you are (你是谁), answer with this exact name and the role. Never replace the name with a generic title.",
   );
+});
+
+test("研发工程师 prompt names the bot without two competing You are identities", () => {
+  const seed = DEFAULT_SEED_BOTS.find((b) => b.name === "研发工程师")!;
+  const prompt = identitySystemPrompt(seed);
+  expect(prompt).toContain("研发工程师");
+  expect(prompt).toContain("Your name is 研发工程师");
+  expect(prompt).toContain(seed.tag);
+  expect(prompt).toContain(seed.description);
+  expect(seed.description.startsWith("You are")).toBe(true);
+  expect(prompt.startsWith("You are 研发工程师")).toBe(false);
+  expect(prompt).not.toMatch(/You are 研发工程师[^\n]*You are/);
 });
 
 test("subsequent start of a not-live bot uses updated store identity", async () => {
