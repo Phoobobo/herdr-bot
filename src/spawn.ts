@@ -131,9 +131,6 @@ async function ensureWorkspace(team: Team): Promise<string> {
   const id = created.workspace?.workspace_id ?? created.workspace_id;
   if (!id) throw new BotError("HERDR", "workspace.create returned no workspace_id");
   team.workspace_id = id;
-  const paneId = created.root_pane?.pane_id ?? created.workspace?.root_pane?.pane_id;
-  const first = defaultBots(team)[0];
-  if (first && paneId && !first.pane_id) first.pane_id = paneId;
   store.saveTeam(team);
   return id;
 }
@@ -152,23 +149,6 @@ async function ensurePane(team: Team, bot: Bot, workspaceId: string): Promise<st
     if (inTab) return inTab.pane_id;
     if (tab.root_pane_id) return tab.root_pane_id;
   }
-  if (bot.pane_id) {
-    const panes = await paneList();
-    if (panes.some((p) => p.pane_id === bot.pane_id)) return bot.pane_id;
-  }
-  // Reuse the workspace's first empty shell tab if this is the first bot and
-  // that tab is still unlabeled / still named after the workspace.
-  if (!tab) {
-    const panes = await paneList();
-    const unused = panes.find(
-      (p) =>
-        p.workspace_id === workspaceId &&
-        !p.agent &&
-        (p.agent_status === "unknown" || !p.agent_status) &&
-        !team.members.some((m) => m.pane_id === p.pane_id && m.id !== bot.id),
-    );
-    if (unused) return unused.pane_id;
-  }
   const created = await herdrJson([
     "tab",
     "create",
@@ -182,6 +162,10 @@ async function ensurePane(team: Team, bot: Bot, workspaceId: string): Promise<st
   ]);
   const paneId = created.root_pane?.pane_id ?? created.pane_id;
   if (!paneId) throw new BotError("HERDR", `tab.create returned no pane for ${bot.name}`);
+  const tabId = created.tab?.tab_id ?? created.tab_id;
+  if (tabId) {
+    await runner(["tab", "rename", tabId, bot.name]).catch(() => ({ stdout: "", stderr: "", exitCode: 0 }));
+  }
   return paneId;
 }
 

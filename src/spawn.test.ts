@@ -78,6 +78,11 @@ beforeEach(() => {
     if (args[0] === "agent" && args[1] === "prompt") {
       return ok({ prompted: args[2] });
     }
+    if (args[0] === "tab" && args[1] === "rename") {
+      const t = tabs.find((x) => x.tab_id === args[2]);
+      if (t) t.label = args.slice(3).join(" ");
+      return ok({});
+    }
     if (args[0] === "pane" && (args[1] === "rename" || args[1] === "report-metadata" || args[1] === "focus")) {
       if (args[1] === "rename") {
         const p = panes.find((x) => x.pane_id === args[2]);
@@ -113,6 +118,27 @@ test("QA gate: ensureTeamLive puts all four default members live", async () => {
   const starts = calls.filter((c) => c[0] === "agent" && c[1] === "start");
   expect(starts.map((c) => c[2])).toEqual(["lead", "eng", "research", "qa"]);
   expect(starts.every((c) => c[c.indexOf("--kind") + 1] === "pi")).toBe(true);
+});
+
+test("QA gate: each bot gets a dedicated named tab, never workspace root pane", async () => {
+  const live = await ensureTeamLive();
+  const creates = calls.filter((c) => c[0] === "tab" && c[1] === "create");
+  expect(creates.map((c) => c[c.indexOf("--label") + 1])).toEqual([...DEFAULT_MEMBER_NAMES]);
+  expect(creates).toHaveLength(4);
+  const starts = calls.filter((c) => c[0] === "agent" && c[1] === "start");
+  const startPanes = starts.map((c) => c[c.indexOf("--pane") + 1]);
+  expect(startPanes).not.toContain("wHB:p1");
+  expect(live.every((m) => m.pane_id !== "wHB:p1")).toBe(true);
+  for (const m of live) {
+    const pane = panes.find((p) => p.pane_id === m.pane_id);
+    const tab = tabs.find((t) => t.tab_id === pane?.tab_id);
+    expect(tab?.label).toBe(m.name);
+    expect(tab?.label).not.toBe("1");
+    expect(tab?.label).not.toBe("herdr-bots");
+    expect(tab?.label).toBeDefined();
+  }
+  const renames = calls.filter((c) => c[0] === "tab" && c[1] === "rename");
+  expect(renames.map((c) => c.slice(3).join(" "))).toEqual([...DEFAULT_MEMBER_NAMES]);
 });
 
 test("openBot is idempotent and does not double-start", async () => {
