@@ -19,6 +19,12 @@ export interface Bot {
   body: string;
   pane_id?: string | null;
   agent_name?: string | null;
+  /** instant-msg session pane (1:1 with the user). Optional for seed/backward compat. */
+  im_pane_id?: string | null;
+  /** channel session pane (#standup). Optional for seed/backward compat. */
+  ch_pane_id?: string | null;
+  im_agent?: string | null;
+  ch_agent?: string | null;
   created_at: number;
   updated_at: number;
 }

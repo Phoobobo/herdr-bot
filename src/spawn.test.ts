@@ -3,8 +3,30 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DEFAULT_MEMBER_NAMES, DEFAULT_SEED_BOTS, USER_ID } from "./types.ts";
-import { agentSlug, deliverChannelPost, ensureTeamLive, formatChannelPrompt, formatDmPrompt, identitySystemPrompt, listLiveBots, openBot, sendComposer, setHerdrRunner } from "./spawn.ts";
-import { createChannel, getDm, loadOrSeedDefaultTeam, postToChannel, resumeDefaultTeam, setBotDescription } from "./store.ts";
+import {
+  BOTS_TAB_LABEL,
+  CHANNEL_SESSION_HINT,
+  IM_SESSION_HINT,
+  PANE_CH,
+  PANE_IM,
+  PANE_WORK,
+  agentSlug,
+  chAgentSlug,
+  deliverChannelPost,
+  ensureTeamLive,
+  formatChannelPrompt,
+  formatDmPrompt,
+  identitySystemPrompt,
+  imAgentSlug,
+  listLiveBots,
+  openBot,
+  openBotsTui,
+  replyTextFromPromptResult,
+  sendComposer,
+  sessionSystemPrompt,
+  setHerdrRunner,
+} from "./spawn.ts";
+import { getDm, loadOrSeedDefaultTeam, postToChannel, resumeDefaultTeam, setBotDescription } from "./store.ts";
 
 let dir: string;
 let calls: string[][];
@@ -13,6 +35,8 @@ let tabs: any[];
 let panes: any[];
 let agents: any[];
 let seq: number;
+
+const WORK_SLUGS = ["lead", "eng", "research", "qa"];
 
 beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-bot-spawn-"));
@@ -59,6 +83,26 @@ beforeEach(() => {
       return ok({ tab: { tab_id }, root_pane: { pane_id } });
     }
     if (cmd === "pane list" || (args[0] === "pane" && args[1] === "list")) return ok({ panes });
+    if (args[0] === "pane" && args[1] === "split") {
+      const parentId = args[2];
+      const parent = panes.find((x) => x.pane_id === parentId);
+      seq++;
+      const pane = {
+        pane_id: `wHB:p${seq}`,
+        workspace_id: "wHB",
+        tab_id: parent?.tab_id,
+        label: undefined,
+        agent_status: "unknown",
+      };
+      panes.push(pane);
+      return ok({ type: "pane_info", pane });
+    }
+    if (args[0] === "pane" && args[1] === "process-info") {
+      return ok({ process_info: { foreground_processes: [] } });
+    }
+    if (args[0] === "pane" && args[1] === "run") {
+      return ok({ ran: args[2] });
+    }
     if (args[0] === "agent" && args[1] === "list") return ok({ agents });
     if (args[0] === "agent" && args[1] === "start") {
       const name = args[2];
@@ -74,7 +118,12 @@ beforeEach(() => {
       return ok({ name, pane_id: pane });
     }
     if (args[0] === "agent" && args[1] === "prompt") {
-      return ok({ prompted: args[2] });
+      const target = args[2];
+      return ok({
+        type: "agent_prompted",
+        agent: { name: target, agent_status: "idle" },
+        text: `reply from ${target}`,
+      });
     }
     if (args[0] === "tab" && args[1] === "rename") {
       const t = tabs.find((x) => x.tab_id === args[2]);
@@ -99,12 +148,24 @@ afterEach(() => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+function starts(): string[][] {
+  return calls.filter((c) => c[0] === "agent" && c[1] === "start");
+}
+
+function prompts(): string[][] {
+  return calls.filter((c) => c[0] === "agent" && c[1] === "prompt");
+}
+
 test("default bot ids are valid herdr agent names", () => {
   const team = resumeDefaultTeam();
   for (const bot of team.members) {
     expect(agentSlug(bot)).toMatch(/^[a-z][a-z0-9_-]{0,31}$/);
+    expect(imAgentSlug(bot)).toMatch(/^[a-z][a-z0-9_-]{0,31}$/);
+    expect(chAgentSlug(bot)).toMatch(/^[a-z][a-z0-9_-]{0,31}$/);
   }
   expect(team.members.map(agentSlug)).toEqual(["lead", "eng", "research", "qa"]);
+  expect(team.members.map(imAgentSlug)).toEqual(["lead-im", "eng-im", "research-im", "qa-im"]);
+  expect(team.members.map(chAgentSlug)).toEqual(["lead-ch", "eng-ch", "research-ch", "qa-ch"]);
 });
 
 test("QA gate: ensureTeamLive puts all four default members live", async () => {
@@ -113,24 +174,38 @@ test("QA gate: ensureTeamLive puts all four default members live", async () => {
   expect(live).toHaveLength(4);
   expect(live.every((m) => m.live)).toBe(true);
   expect(live.every((m) => m.pane_id)).toBe(true);
-  const starts = calls.filter((c) => c[0] === "agent" && c[1] === "start");
-  expect(starts.map((c) => c[2])).toEqual(["lead", "eng", "research", "qa"]);
-  expect(starts.every((c) => c[c.indexOf("--kind") + 1] === "pi")).toBe(true);
+  expect(starts().map((c) => c[2]).sort()).toEqual(
+    ["eng", "eng-ch", "eng-im", "lead", "lead-ch", "lead-im", "qa", "qa-ch", "qa-im", "research", "research-ch", "research-im"],
+  );
+  expect(starts().every((c) => c[c.indexOf("--kind") + 1] === "pi")).toBe(true);
 });
 
-test("QA gate: each agent start injects seed identity via --system-prompt", async () => {
+test("QA gate: work start is identity only; IM/channel starts add a session hint", async () => {
   await ensureTeamLive();
-  const starts = calls.filter((c) => c[0] === "agent" && c[1] === "start");
-  expect(starts).toHaveLength(4);
+  const all = starts();
+  expect(all).toHaveLength(12);
   for (const seed of DEFAULT_SEED_BOTS) {
-    const start = starts.find((c) => c[2] === seed.id);
-    expect(start).toBeDefined();
-    const dash = start!.indexOf("--");
-    expect(dash).toBeGreaterThan(-1);
-    expect(start!.slice(dash, dash + 3)).toEqual(["--", "--system-prompt", identitySystemPrompt(seed)]);
-    expect(start![dash + 2]).toContain(seed.name);
-    expect(start![dash + 2]).toContain(seed.description);
-    expect(start![dash + 2]).toContain(seed.tag);
+    const work = all.find((c) => c[2] === seed.id);
+    expect(work).toBeDefined();
+    const dash = work!.indexOf("--");
+    expect(work!.slice(dash, dash + 3)).toEqual(["--", "--system-prompt", identitySystemPrompt(seed)]);
+    expect(work![dash + 2]).not.toContain(IM_SESSION_HINT);
+    expect(work![dash + 2]).not.toContain(CHANNEL_SESSION_HINT);
+
+    const im = all.find((c) => c[2] === `${seed.id}-im`);
+    expect(im).toBeDefined();
+    const imPrompt = im![im!.indexOf("--") + 2];
+    expect(imPrompt).toBe(sessionSystemPrompt(seed, "im"));
+    expect(imPrompt).toContain(seed.name);
+    expect(imPrompt).toContain(IM_SESSION_HINT);
+
+    const ch = all.find((c) => c[2] === `${seed.id}-ch`);
+    expect(ch).toBeDefined();
+    const chPrompt = ch![ch!.indexOf("--") + 2];
+    expect(chPrompt).toBe(sessionSystemPrompt(seed, "channel"));
+    expect(chPrompt).toContain(seed.name);
+    expect(chPrompt).toContain(CHANNEL_SESSION_HINT);
+    expect(chPrompt).toContain("#standup");
   }
 });
 
@@ -175,10 +250,11 @@ test("subsequent start of a not-live bot uses updated store identity", async () 
   resumeDefaultTeam();
   setBotDescription("研发工程师", "Ships TypeScript without drama.");
   await openBot("研发工程师");
-  const starts = calls.filter((c) => c[0] === "agent" && c[1] === "start");
-  expect(starts).toHaveLength(1);
-  const dash = starts[0].indexOf("--");
-  expect(starts[0].slice(dash, dash + 3)).toEqual([
+  const all = starts();
+  expect(all.map((c) => c[2]).sort()).toEqual(["eng", "eng-ch", "eng-im"]);
+  const work = all.find((c) => c[2] === "eng")!;
+  const dash = work.indexOf("--");
+  expect(work.slice(dash, dash + 3)).toEqual([
     "--",
     "--system-prompt",
     identitySystemPrompt({
@@ -187,19 +263,22 @@ test("subsequent start of a not-live bot uses updated store identity", async () 
       description: "Ships TypeScript without drama.",
     }),
   ]);
-  expect(starts[0][dash + 2]).toContain("研发工程师");
-  expect(starts[0][dash + 2]).toContain("Ships TypeScript without drama.");
-  expect(starts[0][dash + 2]).not.toContain("You are an awesome software engineer.");
+  expect(work[dash + 2]).toContain("研发工程师");
+  expect(work[dash + 2]).toContain("Ships TypeScript without drama.");
+  expect(work[dash + 2]).not.toContain("You are an awesome software engineer.");
 });
 
-test("QA gate: each bot gets a dedicated named tab, never workspace root pane", async () => {
-  const live = await ensureTeamLive();
+test("QA gate: tab1 is bots TUI, never a member name, never 1", async () => {
+  await ensureTeamLive();
+  expect(["bots", "herdr-bots"]).toContain(tabs[0].label);
+  expect(tabs[0].label).toBe(BOTS_TAB_LABEL);
+  expect(tabs[0].label).not.toBe("1");
+  expect([...DEFAULT_MEMBER_NAMES]).not.toContain(tabs[0].label);
   const creates = calls.filter((c) => c[0] === "tab" && c[1] === "create");
   expect(creates.map((c) => c[c.indexOf("--label") + 1])).toEqual([...DEFAULT_MEMBER_NAMES]);
   expect(creates).toHaveLength(4);
-  const starts = calls.filter((c) => c[0] === "agent" && c[1] === "start");
-  const startPanes = starts.map((c) => c[c.indexOf("--pane") + 1]);
-  expect(startPanes).not.toContain("wHB:p1");
+  expect(starts().map((c) => c[c.indexOf("--pane") + 1])).not.toContain("wHB:p1");
+  const live = await listLiveBots();
   expect(live.every((m) => m.pane_id !== "wHB:p1")).toBe(true);
   for (const m of live) {
     const pane = panes.find((p) => p.pane_id === m.pane_id);
@@ -207,49 +286,74 @@ test("QA gate: each bot gets a dedicated named tab, never workspace root pane", 
     expect(tab?.label).toBe(m.name);
     expect(tab?.label).not.toBe("1");
     expect(tab?.label).not.toBe("herdr-bots");
-    expect(tab?.label).toBeDefined();
+    expect(tab?.label).not.toBe("bots");
   }
-  const renames = calls.filter((c) => c[0] === "tab" && c[1] === "rename");
-  expect(renames.map((c) => c.slice(3).join(" "))).toEqual([...DEFAULT_MEMBER_NAMES]);
+});
+
+test("QA gate: each bot tab has work, instant-msg, and channel panes", async () => {
+  await ensureTeamLive();
+  for (const name of DEFAULT_MEMBER_NAMES) {
+    const tab = tabs.find((t) => t.label === name);
+    expect(tab).toBeDefined();
+    const labels = panes.filter((p) => p.tab_id === tab.tab_id).map((p) => p.label);
+    expect(labels).toContain(PANE_WORK);
+    expect(labels).toContain(PANE_IM);
+    expect(labels).toContain(PANE_CH);
+  }
+  expect(starts().some((c) => c[2] === "lead-im")).toBe(true);
+  expect(starts().some((c) => c[2] === "lead-ch")).toBe(true);
+  expect(starts().some((c) => c[2] === "lead")).toBe(true);
+});
+
+test("openBotsTui runs the TUI in the workspace root pane, not a bot tab", async () => {
+  await ensureTeamLive();
+  const before = calls.length;
+  await openBotsTui();
+  const after = calls.slice(before);
+  const run = after.find((c) => c[0] === "pane" && c[1] === "run");
+  expect(run).toBeDefined();
+  expect(run![2]).toBe("wHB:p1");
+  expect(run!.some((a) => String(a).includes("tui.ts"))).toBe(true);
+  const overlay = after.find((c) => c[0] === "plugin" && c.includes("overlay"));
+  expect(overlay).toBeUndefined();
 });
 
 test("openBot is idempotent and does not double-start", async () => {
   await ensureTeamLive();
-  const before = calls.filter((c) => c[0] === "agent" && c[1] === "start").length;
+  const before = starts().length;
   await openBot("研发工程师");
-  const after = calls.filter((c) => c[0] === "agent" && c[1] === "start").length;
-  expect(after).toBe(before);
+  expect(starts().length).toBe(before);
   const live = await listLiveBots();
   expect(live.find((m) => m.name === "研发工程师")?.live).toBe(true);
 });
 
-test("channel post prompts every live member except the sender", async () => {
+test("channel post prompts every live member channel pane except the sender, never work", async () => {
   await ensureTeamLive();
-  createChannel({ name: "standup" });
   postToChannel("standup", "lead", "hello team");
   const result = await deliverChannelPost("standup", "lead", "hello team");
   expect(result.delivered.map((m) => m.name)).toEqual(["研发工程师", "研究员", "测试工程师"]);
   expect(result.skipped).toEqual([]);
-  const prompts = calls.filter((c) => c[0] === "agent" && c[1] === "prompt");
-  expect(prompts.map((c) => c[2])).toEqual(["eng", "research", "qa"]);
-  const text = formatChannelPrompt("standup", "幕僚长", "hello team");
-  expect(prompts.every((c) => c[3] === text)).toBe(true);
-  expect(prompts.some((c) => c[2] === "lead")).toBe(false);
+  const sent = prompts();
+  expect(sent.map((c) => c[2])).toEqual(["eng-ch", "research-ch", "qa-ch"]);
+  expect(sent.every((c) => c.includes("--wait"))).toBe(true);
+  expect(sent.every((c) => c[3].includes(formatChannelPrompt("standup", "幕僚长", "hello team")))).toBe(true);
+  expect(sent.every((c) => c[3].includes("shared #standup"))).toBe(true);
+  expect(sent.some((c) => WORK_SLUGS.includes(c[2]))).toBe(false);
 });
 
-test("channel post from user prompts every live member", async () => {
+test("channel post from user prompts every live member channel pane", async () => {
   await ensureTeamLive();
-  createChannel({ name: "standup" });
   const result = await deliverChannelPost("standup", "user", "hi everyone");
   expect(result.delivered.map((m) => m.name).sort()).toEqual([...DEFAULT_MEMBER_NAMES].sort());
   expect(result.skipped).toEqual([]);
-  const prompts = calls.filter((c) => c[0] === "agent" && c[1] === "prompt");
-  expect(prompts.map((c) => c[2]).sort()).toEqual(["eng", "lead", "qa", "research"]);
-  const body = formatChannelPrompt("standup", "Phoobobo", "hi everyone");
-  expect(prompts.every((c) => c[3] === body)).toBe(true);
+  const sent = prompts();
+  expect(sent.map((c) => c[2]).sort()).toEqual(["eng-ch", "lead-ch", "qa-ch", "research-ch"]);
+  expect(sent.every((c) => c.includes("--wait"))).toBe(true);
+  expect(sent.every((c) => c[3].includes(formatChannelPrompt("standup", "Phoobobo", "hi everyone")))).toBe(true);
+  expect(sent.some((c) => WORK_SLUGS.includes(c[2]))).toBe(false);
 });
 
-test("sendComposer on a bot posts a DM as user and prompts that agent", async () => {
+test("sendComposer on a bot posts a DM as user and prompts that IM agent with --wait", async () => {
   resumeDefaultTeam();
   const msg = await sendComposer({ kind: "bot", index: 0 }, "hello lead");
   expect(msg).not.toBeNull();
@@ -257,26 +361,75 @@ test("sendComposer on a bot posts a DM as user and prompts that agent", async ()
   expect(msg!.text).toBe("hello lead");
   const reloaded = loadOrSeedDefaultTeam();
   const dm = getDm(reloaded, "lead");
-  expect(dm).toHaveLength(1);
-  expect(dm[0].from_bot_id).toBe("user");
-  expect(dm[0].text).toBe("hello lead");
-  const prompts = calls.filter((c) => c[0] === "agent" && c[1] === "prompt");
-  expect(prompts.some((c) => c[2] === "lead" && c[3] === formatDmPrompt("hello lead"))).toBe(true);
+  expect(dm.map((m) => `${m.from_bot_id}: ${m.text}`)).toEqual([
+    "user: hello lead",
+    "lead: reply from lead-im",
+  ]);
+  const sent = prompts();
+  expect(sent.some((c) => c[2] === "lead-im" && c[3] === formatDmPrompt("hello lead") && c.includes("--wait"))).toBe(true);
+  expect(sent.some((c) => c[2] === "lead")).toBe(false);
+  expect(calls.filter((c) => c[0] === "agent" && c[1] === "read")).toEqual([]);
 });
 
-test("sendComposer on a channel posts as user and delivers to live members", async () => {
+test("sendComposer DM to 研发工程师 prompts eng-im --wait, never work slug eng", async () => {
+  resumeDefaultTeam();
+  await sendComposer({ kind: "bot", index: 1 }, "hello eng");
+  const sent = prompts();
+  expect(sent.map((c) => c[2])).toEqual(["eng-im"]);
+  expect(sent[0].includes("--wait")).toBe(true);
+  expect(sent.some((c) => c[2] === "eng")).toBe(false);
+  const dm = getDm("eng");
+  expect(dm.some((m) => m.from_bot_id === "eng" && m.text === "reply from eng-im")).toBe(true);
+  expect(calls.filter((c) => c[0] === "agent" && c[1] === "read")).toEqual([]);
+});
+
+test("sendComposer on a channel posts as user, prompts all *-ch with --wait, never work", async () => {
   await ensureTeamLive();
-  createChannel({ name: "standup" });
-  const before = calls.filter((c) => c[0] === "agent" && c[1] === "prompt").length;
+  const before = prompts().length;
   const msg = await sendComposer({ kind: "channel", index: 0 }, "hi team");
   expect(msg).not.toBeNull();
   expect(msg!.from_bot_id).toBe(USER_ID);
   expect(msg!.text).toBe("hi team");
   const reloaded = loadOrSeedDefaultTeam();
+  expect(reloaded.channels.map((c) => c.name)).toEqual(["standup"]);
+  expect(reloaded.channels).toHaveLength(1);
   expect(reloaded.channels[0].messages[0].from_bot_id).toBe("user");
   expect(reloaded.channels[0].messages[0].text).toBe("hi team");
-  const prompts = calls.filter((c) => c[0] === "agent" && c[1] === "prompt").slice(before);
-  expect(prompts.map((c) => c[2]).sort()).toEqual(["eng", "lead", "qa", "research"]);
-  const body = formatChannelPrompt("standup", "Phoobobo", "hi team");
-  expect(prompts.every((c) => c[3] === body)).toBe(true);
+  const sent = prompts().slice(before);
+  expect(sent.map((c) => c[2])).toEqual(["lead-ch", "eng-ch", "research-ch", "qa-ch"]);
+  expect(sent.every((c) => c.includes("--wait"))).toBe(true);
+  expect(sent.every((c) => c.includes("--timeout"))).toBe(true);
+  expect(sent.some((c) => WORK_SLUGS.includes(c[2]))).toBe(false);
+  expect(calls.filter((c) => c[0] === "agent" && c[1] === "read")).toEqual([]);
+});
+
+test("shared-stream gate: four channel-pane replies land in the same standup messages[] in order", async () => {
+  await ensureTeamLive();
+  await sendComposer({ kind: "channel", index: 0 }, "hello standup");
+  const reloaded = loadOrSeedDefaultTeam();
+  expect(reloaded.channels.map((c) => c.name)).toEqual(["standup"]);
+  expect(reloaded.channels).toHaveLength(1);
+  const ch = reloaded.channels[0];
+  expect(ch.messages.map((m) => `${m.from_bot_id}: ${m.text}`)).toEqual([
+    "user: hello standup",
+    "lead: reply from lead-ch",
+    "eng: reply from eng-ch",
+    "research: reply from research-ch",
+    "qa: reply from qa-ch",
+  ]);
+  const later = prompts().filter((c) => c[2] === "qa-ch")[0];
+  expect(later[3]).toContain("幕僚长: reply from lead-ch");
+  expect(later[3]).toContain("研发工程师: reply from eng-ch");
+  expect(later[3]).toContain("研究员: reply from research-ch");
+});
+
+test("herdr agent_prompted JSON: reply text is result.text, not extractReplyFor", () => {
+  expect(
+    replyTextFromPromptResult({
+      type: "agent_prompted",
+      agent: { name: "lead-im", agent_status: "idle" },
+      text: "pong",
+    }),
+  ).toBe("pong");
+  expect(replyTextFromPromptResult({ type: "agent_prompted", agent: { name: "lead-im" } })).toBeNull();
 });

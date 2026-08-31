@@ -143,7 +143,13 @@ Use it. No secrets belong in this repo.
 
 ## Live harnesses
 
-Open a bot to start its `body` as a Herdr agent in the **default session**, inside a dedicated `herdr-bots` workspace (one tab per bot). Agent names are the bot ids (`lead`, `eng`, `research`, `qa`) because Herdr requires `[a-z][a-z0-9_-]{0,31}`.
+The `herdr-bots` workspace keeps **tab 1** for the bots TUI (`bots`). From tab 2, one named tab per person. Each bot tab has three panes, each its own `herdr agent start`:
+
+| pane | agent | role |
+| ---- | ----- | ---- |
+| `work` | `lead` / `eng` / `research` / `qa` | original work pi (TUI never prompts it) |
+| `instant-msg` | `{id}-im` | private 1:1 with the user |
+| `channel` | `{id}-ch` | this bot's mouth in the **shared** `#standup` room |
 
 ```bash
 herdr-bots bots up --json          # ensure the four default members are live
@@ -151,14 +157,9 @@ herdr-bots bots live --json        # QA: names must be the four, each live
 herdr-bots bots open 研发工程师 --json
 ```
 
-`herdr plugin action invoke phoobobo.herdr-bot.open-bot` with `--name` also works. The first composer send to a bot opens it if it is not live, then prompts that agent.
-
-
-`channel post` writes the overlay log **and** `herdr agent prompt`s every other live member of that channel (not the sender), so the receiving body wakes in its pane and can reply. Composer sends in a 1:1 persist under `team.dms[botId]` and prompt that bot; a channel send from the user prompts every live member.
+TUI send uses `herdr agent prompt <target> <text> --wait` (IM → that bot's `{id}-im`; `#standup` → every member's `{id}-ch`) and writes the wait-returned reply into the overlay store. There is still **one** `#standup` `messages[]`. The TUI path does not scrape `agent read`.
 
 ```bash
 herdr-bots channel create --name standup --json
 herdr-bots channel post standup --from 幕僚长 --text "hello team" --json
 ```
-
-`herdr-bots channel sync standup` reads each live pane and writes replies back into the overlay thread so #standup matches eng / research / qa.

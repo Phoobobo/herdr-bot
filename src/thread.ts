@@ -1,5 +1,6 @@
-// Pull live pane replies back into a channel thread.
-// Overlay log is the source of outbound posts; pane reads fill in the replies.
+// Pull live pane replies back into a channel thread (CLI `channel sync` only).
+// The TUI path must not use this: sendComposer waits on `agent prompt --wait`
+// and writes `.result.text` (or reply/message/read.text) into the store.
 
 import * as store from "./store.ts";
 import { runHerdr } from "./herdr.ts";

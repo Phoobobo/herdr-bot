@@ -1,8 +1,9 @@
 // Open a bot = start its body as a live harness in the default Herdr session.
-// One team workspace (`herdr-bots`); one tab per bot; `herdr agent start`.
+// Workspace tab1 is the bots TUI (`bots` / `herdr-bots`). From tab 2, one
+// named tab per bot with panes: work, instant-msg, channel — each its own pi.
 
 import * as store from "./store.ts";
-import { runHerdr } from "./herdr.ts";
+import { PLUGIN_ID, runHerdr } from "./herdr.ts";
 import {
   BotError,
   DEFAULT_MEMBER_NAMES,
@@ -18,7 +19,17 @@ export type RunResult = { stdout: string; stderr: string; exitCode: number };
 export type HerdrRunner = (args: string[]) => Promise<RunResult>;
 
 const WORKSPACE_LABEL = "herdr-bots";
+const BOTS_TAB_LABEL = "bots";
 const CWD = "/Users/phoobobo/Workspace/herdr-bot";
+const PANE_WORK = "work";
+const PANE_IM = "instant-msg";
+const PANE_CH = "channel";
+const PROMPT_TIMEOUT_MS = "120000";
+
+export const IM_SESSION_HINT =
+  "This pane is a private 1:1 instant-msg with the user. Other bots cannot see this conversation.";
+export const CHANNEL_SESSION_HINT =
+  "This pane is your voice in the shared #standup room. There is one shared message stream; every member sees the same thread.";
 
 let runner: HerdrRunner = (args) => runHerdr(args);
 
@@ -31,6 +42,22 @@ export function agentSlug(bot: Pick<Bot, "id" | "name">): string {
   throw new BotError("BAD_REQUEST", `bot id is not a valid herdr agent name: ${bot.id}`);
 }
 
+export function imAgentSlug(bot: Pick<Bot, "id" | "name">): string {
+  return sessionSlug(agentSlug(bot), "im");
+}
+
+export function chAgentSlug(bot: Pick<Bot, "id" | "name">): string {
+  return sessionSlug(agentSlug(bot), "ch");
+}
+
+function sessionSlug(id: string, suffix: "im" | "ch"): string {
+  const name = `${id}-${suffix}`;
+  if (!/^[a-z][a-z0-9_-]{0,31}$/.test(name)) {
+    throw new BotError("BAD_REQUEST", `session agent name is invalid: ${name}`);
+  }
+  return name;
+}
+
 /** Identity injected into pi via `--system-prompt` on `herdr agent start`. */
 export function identitySystemPrompt(bot: Pick<Bot, "name" | "tag" | "description">): string {
   return [
@@ -38,6 +65,16 @@ export function identitySystemPrompt(bot: Pick<Bot, "name" | "tag" | "descriptio
     `Internal tag: ${bot.tag} (not your title; do not say this when asked who you are).`,
     "When asked who you are (你是谁), answer with this exact name and the description. Never replace the name with a generic title, and never introduce yourself as the tag.",
   ].join(" ");
+}
+
+export function sessionSystemPrompt(
+  bot: Pick<Bot, "name" | "tag" | "description">,
+  session: "work" | "im" | "channel",
+): string {
+  const identity = identitySystemPrompt(bot);
+  if (session === "im") return `${identity} ${IM_SESSION_HINT}`;
+  if (session === "channel") return `${identity} ${CHANNEL_SESSION_HINT}`;
+  return identity;
 }
 
 function unwrap(stdout: string): any {
@@ -61,6 +98,33 @@ async function herdrJson(args: string[]): Promise<any> {
   } catch {
     return {};
   }
+}
+
+/**
+ * Pull the original reply text from `herdr agent prompt --wait` JSON.
+ *
+ * Real herdr  (documented): `.result.agent` is AgentInfo only — no message body.
+ * Tests / future CLI: `.result.text` (also `.reply`, `.message`, `.read.text`).
+ * We never fall back to `agent read` + extractReplyFor on the TUI path.
+ */
+export function replyTextFromPromptResult(result: unknown): string | null {
+  if (result == null) return null;
+  if (typeof result === "string") {
+    return result.trim() ? result : null;
+  }
+  if (typeof result !== "object") return null;
+  const r = result as Record<string, any>;
+  for (const key of ["text", "reply", "message", "content", "last_message", "last_reply"]) {
+    const v = r[key];
+    if (typeof v === "string" && v.trim()) return v;
+  }
+  if (r.read && typeof r.read === "object" && typeof r.read.text === "string" && r.read.text.trim()) {
+    return r.read.text;
+  }
+  if (r.agent && typeof r.agent === "object" && r.agent !== r) {
+    return replyTextFromPromptResult(r.agent);
+  }
+  return null;
 }
 
 export interface LiveMember {
@@ -99,9 +163,13 @@ function agentName(a: any): string {
   return String(a.name ?? a.agent_name ?? "");
 }
 
+function findAgent(agents: any[], slug: string): any | undefined {
+  return agents.find((a) => agentName(a) === slug);
+}
+
 function findLive(bot: Bot, agents: any[], panes: any[]): { pane_id: string; status: string } | null {
   const slug = agentSlug(bot);
-  const named = agents.find((a) => agentName(a) === slug);
+  const named = findAgent(agents, slug);
   if (named?.pane_id) {
     return { pane_id: named.pane_id, status: named.agent_status ?? "unknown" };
   }
@@ -111,11 +179,12 @@ function findLive(bot: Bot, agents: any[], panes: any[]): { pane_id: string; sta
       return { pane_id: pane.pane_id, status: pane.agent_status };
     }
   }
-  const labeled = panes.find(
-    (p) => p.label === bot.name && p.agent && p.agent_status && p.agent_status !== "unknown",
-  );
-  if (labeled) return { pane_id: labeled.pane_id, status: labeled.agent_status };
   return null;
+}
+
+function isBotsTabLabel(label: string | undefined | null): boolean {
+  const v = String(label ?? "");
+  return v === BOTS_TAB_LABEL || v === WORKSPACE_LABEL || v === "herdr-bots";
 }
 
 async function ensureWorkspace(team: Team): Promise<string> {
@@ -126,6 +195,7 @@ async function ensureWorkspace(team: Team): Promise<string> {
   if (existing) {
     team.workspace_id = existing.workspace_id;
     store.saveTeam(team);
+    await ensureBotsTab(existing.workspace_id);
     return existing.workspace_id;
   }
   const created = await herdrJson([
@@ -141,6 +211,7 @@ async function ensureWorkspace(team: Team): Promise<string> {
   if (!id) throw new BotError("HERDR", "workspace.create returned no workspace_id");
   team.workspace_id = id;
   store.saveTeam(team);
+  await ensureBotsTab(id);
   return id;
 }
 
@@ -149,14 +220,53 @@ async function tabPanes(workspaceId: string): Promise<any[]> {
   return r.tabs ?? [];
 }
 
-async function ensurePane(team: Team, bot: Bot, workspaceId: string): Promise<string> {
+async function ensureBotsTab(workspaceId: string): Promise<{ tabId: string; paneId: string }> {
   const tabs = await tabPanes(workspaceId);
-  const tab = tabs.find((t) => t.label === bot.name);
+  const memberNames = new Set<string>(DEFAULT_MEMBER_NAMES);
+  const sorted = [...tabs].sort((a, b) => (a.number ?? 99) - (b.number ?? 99));
+  let tab =
+    sorted.find((t) => isBotsTabLabel(t.label)) ||
+    sorted.find((t) => !memberNames.has(String(t.label ?? "")) && String(t.label ?? "") !== "1") ||
+    sorted.find((t) => String(t.label ?? "") === "1") ||
+    sorted[0];
+  if (!tab?.tab_id) throw new BotError("HERDR", "herdr-bots workspace has no tab for the bots TUI");
+  if (memberNames.has(String(tab.label ?? ""))) {
+    throw new BotError("HERDR", "refusing to seat the bots TUI on a member tab");
+  }
+  if (!isBotsTabLabel(tab.label) || tab.label === "1") {
+    await runner(["tab", "rename", tab.tab_id, BOTS_TAB_LABEL]).catch(() => ({
+      stdout: "",
+      stderr: "",
+      exitCode: 0,
+    }));
+    tab.label = BOTS_TAB_LABEL;
+  } else if (tab.label === WORKSPACE_LABEL || tab.label === "herdr-bots") {
+    await runner(["tab", "rename", tab.tab_id, BOTS_TAB_LABEL]).catch(() => ({
+      stdout: "",
+      stderr: "",
+      exitCode: 0,
+    }));
+    tab.label = BOTS_TAB_LABEL;
+  }
+  const panes = await paneList();
+  const inTab =
+    panes.find((p) => p.tab_id === tab.tab_id && p.workspace_id === workspaceId) ||
+    panes.find((p) => p.tab_id === tab.tab_id);
+  const paneId = inTab?.pane_id ?? tab.root_pane_id;
+  if (!paneId) throw new BotError("HERDR", "bots tab has no pane");
+  return { tabId: tab.tab_id, paneId };
+}
+
+async function ensureBotTab(bot: Bot, workspaceId: string): Promise<{ tabId: string; paneId: string }> {
+  const tabs = await tabPanes(workspaceId);
+  const tab = tabs.find((t) => t.label === bot.name && !isBotsTabLabel(t.label));
   if (tab) {
     const panes = await paneList();
-    const inTab = panes.find((p) => p.tab_id === tab.tab_id && p.workspace_id === workspaceId);
-    if (inTab) return inTab.pane_id;
-    if (tab.root_pane_id) return tab.root_pane_id;
+    const inTab = panes.filter((p) => p.tab_id === tab.tab_id && p.workspace_id === workspaceId);
+    const work = inTab.find((p) => p.label === PANE_WORK);
+    const paneId = work?.pane_id ?? inTab[0]?.pane_id ?? tab.root_pane_id;
+    if (!paneId) throw new BotError("HERDR", `bot tab ${bot.name} has no pane`);
+    return { tabId: tab.tab_id, paneId };
   }
   const created = await herdrJson([
     "tab",
@@ -175,16 +285,26 @@ async function ensurePane(team: Team, bot: Bot, workspaceId: string): Promise<st
   if (tabId) {
     await runner(["tab", "rename", tabId, bot.name]).catch(() => ({ stdout: "", stderr: "", exitCode: 0 }));
   }
-  return paneId;
+  return { tabId: tabId ?? "", paneId };
 }
 
-async function startHarness(bot: Bot, paneId: string): Promise<void> {
-  const slug = agentSlug(bot);
+async function splitPane(paneId: string, direction: "right" | "down"): Promise<string> {
+  const created = await herdrJson(["pane", "split", paneId, "--direction", direction, "--no-focus"]);
+  const id = created.pane?.pane_id ?? created.pane_id;
+  if (!id) throw new BotError("HERDR", `pane.split returned no pane from ${paneId}`);
+  return id;
+}
+
+async function startAgent(
+  bot: Bot,
+  paneId: string,
+  spec: { slug: string; paneLabel: string; session: "work" | "im" | "channel" },
+): Promise<void> {
   const kind = bot.body || "pi";
   await herdrJson([
     "agent",
     "start",
-    slug,
+    spec.slug,
     "--kind",
     kind,
     "--pane",
@@ -193,9 +313,13 @@ async function startHarness(bot: Bot, paneId: string): Promise<void> {
     "30000",
     "--",
     "--system-prompt",
-    identitySystemPrompt(bot),
+    sessionSystemPrompt(bot, spec.session),
   ]);
-  await runner(["pane", "rename", paneId, bot.name]).catch(() => ({ stdout: "", stderr: "", exitCode: 0 }));
+  await runner(["pane", "rename", paneId, spec.paneLabel]).catch(() => ({
+    stdout: "",
+    stderr: "",
+    exitCode: 0,
+  }));
   await runner([
     "pane",
     "report-metadata",
@@ -203,39 +327,147 @@ async function startHarness(bot: Bot, paneId: string): Promise<void> {
     "--source",
     "herdr-bot",
     "--agent",
-    slug,
+    spec.slug,
     "--display-agent",
     bot.name,
     "--title",
-    bot.name,
+    spec.paneLabel,
   ]).catch(() => ({ stdout: "", stderr: "", exitCode: 0 }));
+}
+
+function tuiAlreadyRunning(info: any, paneId: string): boolean {
+  const proc = info.process_info ?? info;
+  const list = proc?.foreground_processes ?? info.foreground_processes ?? [];
+  const blob = JSON.stringify(list);
+  return blob.includes("tui.ts") || blob.includes("herdr-bot");
+}
+
+/** Run the bots TUI in workspace tab1 so focusing that tab shows it. Overlay is fallback. */
+export async function openBotsTui(): Promise<void> {
+  const team = store.resumeDefaultTeam();
+  const workspaceId = await ensureWorkspace(team);
+  const { paneId } = await ensureBotsTab(workspaceId);
+  await runner(["pane", "rename", paneId, BOTS_TAB_LABEL]).catch(() => ({
+    stdout: "",
+    stderr: "",
+    exitCode: 0,
+  }));
+  let running = false;
+  try {
+    const info = await herdrJson(["pane", "process-info", paneId]);
+    running = tuiAlreadyRunning(info, paneId);
+  } catch {
+    running = false;
+  }
+  if (!running) {
+    const run = await runner(["pane", "run", paneId, "bun", "run", `${CWD}/src/tui.ts`]);
+    if (run.exitCode !== 0) {
+      const overlay = await runner([
+        "plugin",
+        "pane",
+        "open",
+        "--plugin",
+        PLUGIN_ID,
+        "--entrypoint",
+        "tui",
+        "--placement",
+        "overlay",
+        "--focus",
+      ]);
+      if (overlay.exitCode !== 0) {
+        const err =
+          (overlay.stderr || overlay.stdout).trim() || "failed to open herdr-bot TUI";
+        throw new BotError("HERDR", err);
+      }
+      if (overlay.stdout.trim()) process.stdout.write(overlay.stdout);
+      return;
+    }
+  }
+  await runner(["pane", "focus", paneId]).catch(() => ({ stdout: "", stderr: "", exitCode: 0 }));
+}
+
+function ensureStandupChannel(team: Team): void {
+  if (team.channels.some((c) => c.name === "standup")) return;
+  store.createChannel(team, { name: "standup", description: "standup" });
+}
+
+async function ensureBotLive(bot: Bot, team: Team): Promise<void> {
+  const workspaceId = await ensureWorkspace(team);
+  const { tabId, paneId: rootPaneId } = await ensureBotTab(bot, workspaceId);
+  const workSlug = agentSlug(bot);
+  const imSlug = imAgentSlug(bot);
+  const chSlug = chAgentSlug(bot);
+
+  let agents = await agentList();
+  let panes = await paneList();
+  const inTab = () => panes.filter((p) => p.tab_id === tabId);
+
+  const workNamed = findAgent(agents, workSlug);
+  let workPane = workNamed?.pane_id ?? inTab().find((p) => p.label === PANE_WORK)?.pane_id ?? rootPaneId;
+  if (!workNamed) {
+    await startAgent(bot, workPane, { slug: workSlug, paneLabel: PANE_WORK, session: "work" });
+  } else {
+    await runner(["pane", "rename", workPane, PANE_WORK]).catch(() => ({
+      stdout: "",
+      stderr: "",
+      exitCode: 0,
+    }));
+  }
+
+  agents = await agentList();
+  panes = await paneList();
+  const imNamed = findAgent(agents, imSlug);
+  let imPane = imNamed?.pane_id ?? inTab().find((p) => p.label === PANE_IM)?.pane_id;
+  if (!imPane) imPane = await splitPane(workPane, "right");
+  if (!imNamed) {
+    await startAgent(bot, imPane, { slug: imSlug, paneLabel: PANE_IM, session: "im" });
+  } else {
+    await runner(["pane", "rename", imPane, PANE_IM]).catch(() => ({
+      stdout: "",
+      stderr: "",
+      exitCode: 0,
+    }));
+  }
+
+  agents = await agentList();
+  panes = await paneList();
+  const chNamed = findAgent(agents, chSlug);
+  let chPane = chNamed?.pane_id ?? inTab().find((p) => p.label === PANE_CH)?.pane_id;
+  if (!chPane) chPane = await splitPane(workPane, "down");
+  if (!chNamed) {
+    await startAgent(bot, chPane, { slug: chSlug, paneLabel: PANE_CH, session: "channel" });
+  } else {
+    await runner(["pane", "rename", chPane, PANE_CH]).catch(() => ({
+      stdout: "",
+      stderr: "",
+      exitCode: 0,
+    }));
+  }
+
+  bot.pane_id = workPane;
+  bot.agent_name = workSlug;
+  bot.im_pane_id = imPane;
+  bot.ch_pane_id = chPane;
+  bot.im_agent = imSlug;
+  bot.ch_agent = chSlug;
+  store.saveTeam(team);
 }
 
 export async function openBot(idOrName: string): Promise<Bot> {
   const team = store.resumeDefaultTeam();
   const bot = store.findBot(team, idOrName);
-  const agents = await agentList();
-  const panes = await paneList();
-  const live = findLive(bot, agents, panes);
-  if (live) {
-    bot.pane_id = live.pane_id;
-    bot.agent_name = agentSlug(bot);
-    store.saveTeam(team);
-    await runner(["pane", "focus", live.pane_id]).catch(() => ({ stdout: "", stderr: "", exitCode: 0 }));
-    return bot;
+  ensureStandupChannel(team);
+  await ensureBotLive(bot, team);
+  if (bot.pane_id) {
+    await runner(["pane", "focus", bot.pane_id]).catch(() => ({ stdout: "", stderr: "", exitCode: 0 }));
   }
-  const workspaceId = await ensureWorkspace(team);
-  const paneId = await ensurePane(team, bot, workspaceId);
-  await startHarness(bot, paneId);
-  bot.pane_id = paneId;
-  bot.agent_name = agentSlug(bot);
-  store.saveTeam(team);
   return bot;
 }
 
 export async function ensureTeamLive(): Promise<LiveMember[]> {
   const team = store.resumeDefaultTeam();
   await ensureWorkspace(team);
+  ensureStandupChannel(team);
   for (const bot of defaultBots(team)) {
     await openBot(bot.id);
   }
@@ -272,6 +504,43 @@ export function formatDmPrompt(text: string): string {
   return `[dm] ${USER_DISPLAY_NAME}: ${text}`;
 }
 
+function senderDisplay(team: Team, fromId: string): string {
+  if (fromId === USER_ID) return USER_DISPLAY_NAME;
+  return team.members.find((b) => b.id === fromId)?.name ?? fromId;
+}
+
+/** One shared #channel stream: every member's channel pane sees the same who-said-what thread. */
+export function formatSharedChannelPrompt(
+  channel: string,
+  fromName: string,
+  text: string,
+  thread: string[],
+): string {
+  const inbound = formatChannelPrompt(channel, fromName, text);
+  return [
+    `You are in the shared #${channel} room. There is one message stream; every member sees the same thread.`,
+    thread.length ? "Recent thread:" : "The shared thread so far is empty except this post.",
+    ...thread.map((line) => `  ${line}`),
+    `New message: ${inbound}`,
+    "Reply as yourself. Your reply is appended to this same shared thread.",
+  ].join("\n");
+}
+
+async function promptSessionAndWait(slug: string, text: string): Promise<string | null> {
+  const result = await herdrJson([
+    "agent",
+    "prompt",
+    slug,
+    text,
+    "--wait",
+    "--until",
+    "idle",
+    "--timeout",
+    PROMPT_TIMEOUT_MS,
+  ]);
+  return replyTextFromPromptResult(result);
+}
+
 export async function deliverChannelPost(
   channel: string,
   fromIdOrName: string,
@@ -282,28 +551,36 @@ export async function deliverChannelPost(
   const from = store.resolveFrom(team, fromIdOrName);
   const agents = await agentList();
   const panes = await paneList();
-  const prompt = formatChannelPrompt(ch.name, from.name, text);
   const delivered: LiveMember[] = [];
   const skipped: Array<LiveMember & { reason?: string }> = [];
   for (const id of ch.member_ids) {
     if (from.id !== USER_ID && id === from.id) continue;
     const bot = team.members.find((b) => b.id === id);
     if (!bot) continue;
-    const live = findLive(bot, agents, panes);
+    const slug = chAgentSlug(bot);
+    const named = findAgent(agents, slug);
+    const work = findLive(bot, agents, panes);
     const row: LiveMember = {
       name: bot.name,
-      slug: agentSlug(bot),
+      slug,
       body: bot.body,
-      pane_id: live?.pane_id ?? bot.pane_id ?? null,
-      status: live?.status ?? null,
-      live: !!live,
+      pane_id: named?.pane_id ?? bot.ch_pane_id ?? work?.pane_id ?? bot.pane_id ?? null,
+      status: named?.agent_status ?? work?.status ?? null,
+      live: !!named,
     };
-    if (!live) {
+    if (!named) {
       skipped.push({ ...row, reason: "not live" });
       continue;
     }
     try {
-      await herdrJson(["agent", "prompt", agentSlug(bot), prompt]);
+      const liveTeam = store.resumeDefaultTeam();
+      const liveCh = store.findChannel(liveTeam, channel);
+      const thread = liveCh.messages.map(
+        (m) => `${senderDisplay(liveTeam, m.from_bot_id)}: ${m.text}`,
+      );
+      const prompt = formatSharedChannelPrompt(liveCh.name, from.name, text, thread);
+      const reply = await promptSessionAndWait(slug, prompt);
+      if (reply) store.postToChannel(ch.id, bot.id, reply);
       delivered.push(row);
     } catch (err) {
       skipped.push({ ...row, reason: err instanceof Error ? err.message : String(err) });
@@ -314,7 +591,8 @@ export async function deliverChannelPost(
 
 export async function deliverDmPost(botIdOrName: string, text: string): Promise<Bot> {
   const bot = await openBot(botIdOrName);
-  await herdrJson(["agent", "prompt", agentSlug(bot), formatDmPrompt(text)]);
+  const reply = await promptSessionAndWait(imAgentSlug(bot), formatDmPrompt(text));
+  if (reply) store.postToDm(bot.id, bot.id, reply);
   return bot;
 }
 
@@ -339,4 +617,12 @@ export async function sendComposer(
   return msg;
 }
 
-export { DEFAULT_SESSION, WORKSPACE_LABEL };
+export {
+  DEFAULT_SESSION,
+  WORKSPACE_LABEL,
+  BOTS_TAB_LABEL,
+  PANE_WORK,
+  PANE_IM,
+  PANE_CH,
+  PROMPT_TIMEOUT_MS,
+};

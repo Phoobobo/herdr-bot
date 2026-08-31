@@ -1,11 +1,11 @@
 // Plugin action entrypoint. herdr sets HERDR_PLUGIN_ACTION_ID; argv fallback
 // keeps `bun run src/actions.ts bots` usable by hand.
 
-import { DEFAULT_SESSION, PLUGIN_ID, runHerdr } from "./herdr.ts";
+import { DEFAULT_SESSION, runHerdr } from "./herdr.ts";
 import * as store from "./store.ts";
 import { resolveBody } from "./integrations.ts";
 import { BotError } from "./types.ts";
-import { openBot } from "./spawn.ts";
+import { openBot, openBotsTui } from "./spawn.ts";
 
 function actionId(): string {
   return (process.env.HERDR_PLUGIN_ACTION_ID || process.argv[2] || "").trim();
@@ -41,25 +41,7 @@ function positional(args: string[]): string[] {
 export async function openDefaultOverlay(): Promise<void> {
   store.resumeDefaultTeam();
   await runHerdr(["session", "list"], { session: DEFAULT_SESSION }).catch(() => {});
-  const pane = await runHerdr(
-    [
-      "plugin",
-      "pane",
-      "open",
-      "--plugin",
-      PLUGIN_ID,
-      "--entrypoint",
-      "tui",
-      "--placement",
-      "overlay",
-      "--focus",
-    ],
-    { session: DEFAULT_SESSION },
-  );
-  if (pane.exitCode !== 0) {
-    throw new Error(pane.stderr.trim() || pane.stdout.trim() || "failed to open herdr-bot overlay");
-  }
-  if (pane.stdout.trim()) process.stdout.write(pane.stdout);
+  await openBotsTui();
 }
 
 export async function dispatch(id: string, args: string[]): Promise<void> {

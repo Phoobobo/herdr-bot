@@ -2,7 +2,6 @@
 
 import * as store from "./store.ts";
 import { sendComposer } from "./spawn.ts";
-import { syncChannelReplies, syncDmReplies } from "./thread.ts";
 import type { Bot, Channel, Team } from "./types.ts";
 import { DEFAULT_BODY } from "./types.ts";
 import { chatView } from "./view.ts";
@@ -216,33 +215,9 @@ function handlePrompt(ev: InputEvent): void {
 }
 
 function syncSelected(): void {
-  if (sel.kind === "channel") {
-    const ch = team.channels[sel.index];
-    if (!ch) return;
-    void syncChannelReplies(ch.id)
-      .then((r) => {
-        status = r.added.length ? `synced ${r.added.length}` : "";
-        team = store.loadOrSeedDefaultTeam();
-        paint();
-      })
-      .catch((err) => {
-        status = err instanceof Error ? err.message : String(err);
-        paint();
-      });
-    return;
-  }
-  const bot = team.members[sel.index];
-  if (!bot) return;
-  void syncDmReplies(bot.id)
-    .then((r) => {
-      status = r.added.length ? `synced ${r.added.length}` : "";
-      team = store.loadOrSeedDefaultTeam();
-      paint();
-    })
-    .catch((err) => {
-      status = err instanceof Error ? err.message : String(err);
-      paint();
-    });
+  // Replies are written by sendComposer after `agent prompt --wait`.
+  // Do not screen-scrape (`agent read` / extractReplyFor) on the TUI path.
+  reload();
 }
 
 function move(delta: number): void {

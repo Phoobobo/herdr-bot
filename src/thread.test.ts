@@ -114,3 +114,23 @@ test("user channel posts are outbound for sync", async () => {
   expect(added.map((a) => a.from)).toContain("研发工程师");
   expect(added.find((a) => a.from === "研发工程师")?.text).toBe("收到");
 });
+
+test("shared-stream gate: one standup channel holds every member reply in order", () => {
+  resumeDefaultTeam();
+  createChannel({ name: "standup" });
+  postToChannel("standup", "user", "hello");
+  postToChannel("standup", "lead", "a");
+  postToChannel("standup", "eng", "b");
+  postToChannel("standup", "research", "c");
+  postToChannel("standup", "qa", "d");
+  const team = resumeDefaultTeam();
+  expect(team.channels.map((c) => c.name)).toEqual(["standup"]);
+  expect(team.channels).toHaveLength(1);
+  expect(threadLines(team, team.channels[0])).toEqual([
+    "Phoobobo: hello",
+    "幕僚长: a",
+    "研发工程师: b",
+    "研究员: c",
+    "测试工程师: d",
+  ]);
+});
