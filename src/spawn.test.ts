@@ -22,6 +22,7 @@ import {
   openBot,
   openBotsTui,
   replyTextFromPromptResult,
+  replyTextFromSessionRead,
   sendComposer,
   sessionSystemPrompt,
   setHerdrRunner,
@@ -35,6 +36,11 @@ let tabs: any[];
 let panes: any[];
 let agents: any[];
 let seq: number;
+let promptIncludeText: boolean;
+let promptAgentStatus: string;
+let promptTimeout: boolean;
+let readDump: string | null;
+let startBusySlugs: Set<string>;
 
 const WORK_SLUGS = ["lead", "eng", "research", "qa"];
 
@@ -48,6 +54,11 @@ beforeEach(() => {
   panes = [];
   agents = [];
   seq = 0;
+  promptIncludeText = true;
+  promptAgentStatus = "done";
+  promptTimeout = false;
+  readDump = null;
+  startBusySlugs = new Set();
   setHerdrRunner(async (args) => {
     calls.push(args);
     const cmd = args.join(" ");
@@ -106,6 +117,14 @@ beforeEach(() => {
     if (args[0] === "agent" && args[1] === "list") return ok({ agents });
     if (args[0] === "agent" && args[1] === "start") {
       const name = args[2];
+      if (startBusySlugs.has(name)) {
+        startBusySlugs.delete(name);
+        return {
+          stdout: "",
+          stderr: JSON.stringify({ error: { code: "agent_pane_busy", message: "agent_pane_busy" } }),
+          exitCode: 1,
+        };
+      }
       const kind = args[args.indexOf("--kind") + 1];
       const pane = args[args.indexOf("--pane") + 1];
       agents.push({ name, agent: kind, pane_id: pane, agent_status: "idle" });
@@ -118,12 +137,22 @@ beforeEach(() => {
       return ok({ name, pane_id: pane });
     }
     if (args[0] === "agent" && args[1] === "prompt") {
+      if (promptTimeout) {
+        return { stdout: "", stderr: "timeout", exitCode: 1 };
+      }
       const target = args[2];
-      return ok({
+      const payload: Record<string, unknown> = {
         type: "agent_prompted",
-        agent: { name: target, agent_status: "idle" },
-        text: `reply from ${target}`,
-      });
+        agent: { name: target, agent_status: promptAgentStatus },
+      };
+      if (promptIncludeText) payload.text = `reply from ${target}`;
+      return ok(payload);
+    }
+    if (args[0] === "agent" && args[1] === "read") {
+      if (readDump != null) {
+        return { stdout: readDump, stderr: "", exitCode: 0 };
+      }
+      return ok({});
     }
     if (args[0] === "tab" && args[1] === "rename") {
       const t = tabs.find((x) => x.tab_id === args[2]);
@@ -335,7 +364,7 @@ test("channel post prompts every live member channel pane except the sender, nev
   expect(result.skipped).toEqual([]);
   const sent = prompts();
   expect(sent.map((c) => c[2])).toEqual(["eng-ch", "research-ch", "qa-ch"]);
-  expect(sent.every((c) => c.includes("--wait"))).toBe(true);
+  expect(sent.every((c) => c.includes("--wait") && c.includes("--timeout") && !c.includes("--until"))).toBe(true);
   expect(sent.every((c) => c[3].includes(formatChannelPrompt("standup", "幕僚长", "hello team")))).toBe(true);
   expect(sent.every((c) => c[3].includes("shared #standup"))).toBe(true);
   expect(sent.some((c) => WORK_SLUGS.includes(c[2]))).toBe(false);
@@ -348,7 +377,7 @@ test("channel post from user prompts every live member channel pane", async () =
   expect(result.skipped).toEqual([]);
   const sent = prompts();
   expect(sent.map((c) => c[2]).sort()).toEqual(["eng-ch", "lead-ch", "qa-ch", "research-ch"]);
-  expect(sent.every((c) => c.includes("--wait"))).toBe(true);
+  expect(sent.every((c) => c.includes("--wait") && c.includes("--timeout") && !c.includes("--until"))).toBe(true);
   expect(sent.every((c) => c[3].includes(formatChannelPrompt("standup", "Phoobobo", "hi everyone")))).toBe(true);
   expect(sent.some((c) => WORK_SLUGS.includes(c[2]))).toBe(false);
 });
@@ -367,6 +396,8 @@ test("sendComposer on a bot posts a DM as user and prompts that IM agent with --
   ]);
   const sent = prompts();
   expect(sent.some((c) => c[2] === "lead-im" && c[3] === formatDmPrompt("hello lead") && c.includes("--wait"))).toBe(true);
+  expect(sent.every((c) => c.includes("--wait") && c.includes("--timeout"))).toBe(true);
+  expect(sent.every((c) => !c.includes("--until"))).toBe(true);
   expect(sent.some((c) => c[2] === "lead")).toBe(false);
   expect(calls.filter((c) => c[0] === "agent" && c[1] === "read")).toEqual([]);
 });
@@ -377,6 +408,8 @@ test("sendComposer DM to 研发工程师 prompts eng-im --wait, never work slug 
   const sent = prompts();
   expect(sent.map((c) => c[2])).toEqual(["eng-im"]);
   expect(sent[0].includes("--wait")).toBe(true);
+  expect(sent[0].includes("--timeout")).toBe(true);
+  expect(sent[0].includes("--until")).toBe(false);
   expect(sent.some((c) => c[2] === "eng")).toBe(false);
   const dm = getDm("eng");
   expect(dm.some((m) => m.from_bot_id === "eng" && m.text === "reply from eng-im")).toBe(true);
@@ -399,6 +432,7 @@ test("sendComposer on a channel posts as user, prompts all *-ch with --wait, nev
   expect(sent.map((c) => c[2])).toEqual(["lead-ch", "eng-ch", "research-ch", "qa-ch"]);
   expect(sent.every((c) => c.includes("--wait"))).toBe(true);
   expect(sent.every((c) => c.includes("--timeout"))).toBe(true);
+  expect(sent.every((c) => !c.includes("--until"))).toBe(true);
   expect(sent.some((c) => WORK_SLUGS.includes(c[2]))).toBe(false);
   expect(calls.filter((c) => c[0] === "agent" && c[1] === "read")).toEqual([]);
 });
@@ -432,4 +466,97 @@ test("herdr agent_prompted JSON: reply text is result.text, not extractReplyFor"
     }),
   ).toBe("pong");
   expect(replyTextFromPromptResult({ type: "agent_prompted", agent: { name: "lead-im" } })).toBeNull();
+  expect(
+    replyTextFromPromptResult({
+      type: "agent_prompted",
+      agent: { name: "eng-im", agent_status: "done" },
+      text: "收到：qa-im-ping-0901-a",
+    }),
+  ).toBe("收到：qa-im-ping-0901-a");
+});
+
+// Live herdr 0.8.2 `agent read --source recent-unwrapped --format text` of eng-im
+// after the QA 1:1 ping (CLI prints .result.read.text).
+const ENG_IM_READ_FIXTURE = `
+ [dm] Phoobobo: qa-im-ping-0901-a
+
+
+ Planning concise ping acknowledgment
+
+ 收到：qa-im-ping-0901-a
+
+╭────────────────────────────────────────────────────────────────╮
+
+╰────────────────────────────────────────────────────────────────╯
+~/Workspace/herdr-bot (main)
+↑1.2k ↓46 $0.000 (sub) 0.4%/272k (auto)        gpt-5.6-luna • high
+`;
+
+test("session read snapshot: last non-empty line after the prompt, not the Pi footer", () => {
+  const prompt = formatDmPrompt("qa-im-ping-0901-a");
+  expect(replyTextFromSessionRead(ENG_IM_READ_FIXTURE, prompt)).toBe("收到：qa-im-ping-0901-a");
+  expect(replyTextFromSessionRead("pong", prompt)).toBe("pong");
+});
+
+test("sendComposer writes the reply when wait JSON is agent_status done with text", async () => {
+  promptAgentStatus = "done";
+  promptIncludeText = true;
+  resumeDefaultTeam();
+  await sendComposer({ kind: "bot", index: 1 }, "hello eng");
+  const dm = getDm("eng");
+  expect(dm.some((m) => m.from_bot_id === "eng" && m.text === "reply from eng-im")).toBe(true);
+  const sent = prompts();
+  expect(sent[0].includes("--until")).toBe(false);
+  expect(sent[0].includes("--wait")).toBe(true);
+  expect(sent[0].includes("--timeout")).toBe(true);
+  expect(calls.filter((c) => c[0] === "agent" && c[1] === "read")).toEqual([]);
+});
+
+test("sendComposer reads *-im snapshot when wait JSON is done with no body", async () => {
+  promptAgentStatus = "done";
+  promptIncludeText = false;
+  readDump = ENG_IM_READ_FIXTURE;
+  resumeDefaultTeam();
+  await sendComposer({ kind: "bot", index: 1 }, "qa-im-ping-0901-a");
+  const dm = getDm("eng");
+  expect(dm.map((m) => `${m.from_bot_id}: ${m.text}`)).toEqual([
+    "user: qa-im-ping-0901-a",
+    "eng: 收到：qa-im-ping-0901-a",
+  ]);
+  const sent = prompts();
+  expect(sent.map((c) => c[2])).toEqual(["eng-im"]);
+  expect(sent[0].includes("--until")).toBe(false);
+  const reads = calls.filter((c) => c[0] === "agent" && c[1] === "read");
+  expect(reads.map((c) => c[2])).toEqual(["eng-im"]);
+  expect(reads.some((c) => c[2] === "eng")).toBe(false);
+});
+
+test("sendComposer reads socket JSON .read.text when wait JSON has no body", async () => {
+  promptAgentStatus = "done";
+  promptIncludeText = false;
+  readDump = JSON.stringify({
+    id: "cli:agent:read",
+    result: { read: { text: ENG_IM_READ_FIXTURE } },
+  }) + "\n";
+  resumeDefaultTeam();
+  await sendComposer({ kind: "bot", index: 1 }, "qa-im-ping-0901-a");
+  const dm = getDm("eng");
+  expect(dm.some((m) => m.from_bot_id === "eng" && m.text === "收到：qa-im-ping-0901-a")).toBe(true);
+});
+
+test("prompt --wait timeout does not invent a reply", async () => {
+  promptTimeout = true;
+  resumeDefaultTeam();
+  await expect(sendComposer({ kind: "bot", index: 1 }, "hello eng")).rejects.toThrow();
+  const dm = getDm("eng");
+  expect(dm.map((m) => `${m.from_bot_id}: ${m.text}`)).toEqual(["user: hello eng"]);
+  expect(calls.filter((c) => c[0] === "agent" && c[1] === "read")).toEqual([]);
+});
+
+test("agent start retries agent_pane_busy on a fresh split pane", async () => {
+  startBusySlugs.add("eng-im");
+  await openBot("研发工程师");
+  expect(agents.some((a) => a.name === "eng-im")).toBe(true);
+  expect(starts().filter((c) => c[2] === "eng-im")).toHaveLength(2);
+  expect(starts().filter((c) => c[2] === "eng")).toHaveLength(1);
 });

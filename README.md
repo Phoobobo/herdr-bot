@@ -157,7 +157,7 @@ herdr-bots bots live --json        # QA: names must be the four, each live
 herdr-bots bots open 研发工程师 --json
 ```
 
-TUI send uses `herdr agent prompt <target> <text> --wait` (IM → that bot's `{id}-im`; `#standup` → every member's `{id}-ch`) and writes the wait-returned reply into the overlay store. There is still **one** `#standup` `messages[]`. The TUI path does not scrape `agent read`.
+TUI send uses `herdr agent prompt <target> <text> --wait --timeout 120000` (IM → that bot's `{id}-im`; `#standup` → every member's `{id}-ch`) and writes the reply into the overlay store. `--until` is omitted so herdr's default accepts idle, done, or blocked. If the wait JSON has no message body (herdr 0.8.2), the same session slug is `agent read` and the last transcript line after the prompt is stored. There is still **one** `#standup` `messages[]`. The TUI path never prompts work slugs or uses `extractReplyFor`.
 
 ```bash
 herdr-bots channel create --name standup --json

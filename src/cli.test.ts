@@ -5,17 +5,28 @@ import path from "node:path";
 import { DEFAULT_MEMBER_NAMES } from "./types.ts";
 
 let dir: string;
+let fakeHerdr: string;
 
 beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-bot-cli-"));
   process.env.HERDR_BOT_STATE_DIR = dir;
   process.env.HERDR_BOT_BODIES = "pi,omp,claude,codex,copilot,opencode,hermes,grok";
+  const fakeDir = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-bot-cli-bin-"));
+  fakeHerdr = path.join(fakeDir, "herdr");
+  // Isolate CLI tests from the live default session. channel post used to
+  // `agent prompt --wait` real *-ch panes (and could hang once wait accepted done).
+  fs.writeFileSync(
+    fakeHerdr,
+    "#!/bin/sh\necho '{\"id\":\"cli\",\"result\":{\"agents\":[],\"panes\":[],\"workspaces\":[],\"tabs\":[]}}'\n",
+  );
+  fs.chmodSync(fakeHerdr, 0o755);
 });
 
 afterEach(() => {
   delete process.env.HERDR_BOT_STATE_DIR;
   delete process.env.HERDR_BOT_BODIES;
   fs.rmSync(dir, { recursive: true, force: true });
+  fs.rmSync(path.dirname(fakeHerdr), { recursive: true, force: true });
 });
 
 function cli(...args: string[]) {
@@ -24,6 +35,7 @@ function cli(...args: string[]) {
       ...process.env,
       HERDR_BOT_STATE_DIR: dir,
       HERDR_BOT_BODIES: "pi,omp,claude,codex,copilot,opencode,hermes,grok",
+      HERDR_BIN_PATH: fakeHerdr,
     },
     stdout: "pipe",
     stderr: "pipe",

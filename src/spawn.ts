@@ -103,9 +103,10 @@ async function herdrJson(args: string[]): Promise<any> {
 /**
  * Pull the original reply text from `herdr agent prompt --wait` JSON.
  *
- * Real herdr  (documented): `.result.agent` is AgentInfo only — no message body.
+ * Real herdr 0.8.2 (documented): `.result.agent` is AgentInfo only — no message body.
  * Tests / future CLI: `.result.text` (also `.reply`, `.message`, `.read.text`).
- * We never fall back to `agent read` + extractReplyFor on the TUI path.
+ * Do not use extractReplyFor. If the wait JSON has no body, promptSessionAndWait
+ * reads the same session slug and uses replyTextFromSessionRead.
  */
 export function replyTextFromPromptResult(result: unknown): string | null {
   if (result == null) return null;
@@ -125,6 +126,68 @@ export function replyTextFromPromptResult(result: unknown): string | null {
     return replyTextFromPromptResult(r.agent);
   }
   return null;
+}
+
+function isSessionSlug(slug: string): boolean {
+  return /-(im|ch)$/.test(slug);
+}
+
+/**
+ * After a successful `agent prompt --wait`, herdr 0.8.2 still has no message
+ * body. Documented follow-up is `agent read` on that same session slug
+ * (`*-im` / `*-ch` only). CLI prints `.result.read.text` (socket field) as
+ * UTF-8; it is a raw terminal snapshot, not a last-assistant-message object.
+ *
+ * Slice: last non-empty line after the submitted prompt in that snapshot.
+ * Stop at the first box-drawing-only line so the Pi TUI footer (box / cwd /
+ * token bar) is not taken as the reply. This is not extractReplyFor: no
+ * thinking-line skip, no inbound-marker parse, no chrome paragraph walk.
+ */
+export function replyTextFromSessionRead(dump: string, prompt: string): string | null {
+  if (!dump?.trim()) return null;
+  const idx = prompt ? dump.lastIndexOf(prompt) : -1;
+  const slice = idx >= 0 ? dump.slice(idx + prompt.length) : dump;
+  const collected: string[] = [];
+  for (const raw of slice.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (/^[\s╭╮╰╯─│━]+$/.test(line)) break;
+    collected.push(line);
+  }
+  return collected.length ? collected[collected.length - 1] : null;
+}
+
+function snapshotTextFromReadStdout(stdout: string): string {
+  const trimmed = stdout.trim();
+  if (!trimmed) return "";
+  try {
+    const parsed = unwrap(stdout);
+    if (parsed && typeof parsed === "object") {
+      if (typeof parsed.read?.text === "string") return parsed.read.text;
+      if (typeof parsed.text === "string" && parsed.text.trim()) return parsed.text;
+      // JSON-RPC envelope with no snapshot field: CLI printed nothing.
+      if (trimmed.startsWith("{") && parsed.read == null) return "";
+    }
+  } catch {
+    // CLI `agent read` prints the snapshot as UTF-8, not JSON.
+  }
+  return stdout;
+}
+
+async function readSessionSnapshot(slug: string): Promise<string> {
+  const res = await runner([
+    "agent",
+    "read",
+    slug,
+    "--source",
+    "recent-unwrapped",
+    "--lines",
+    "160",
+    "--format",
+    "text",
+  ]);
+  if (res.exitCode !== 0) return "";
+  return snapshotTextFromReadStdout(res.stdout);
 }
 
 export interface LiveMember {
@@ -301,7 +364,7 @@ async function startAgent(
   spec: { slug: string; paneLabel: string; session: "work" | "im" | "channel" },
 ): Promise<void> {
   const kind = bot.body || "pi";
-  await herdrJson([
+  const startArgs = [
     "agent",
     "start",
     spec.slug,
@@ -314,7 +377,22 @@ async function startAgent(
     "--",
     "--system-prompt",
     sessionSystemPrompt(bot, spec.session),
-  ]);
+  ];
+  // Fresh split panes can still be settling (not a shell yet). herdr then
+  // returns agent_pane_busy. Retry the same start; do not kill other workspaces.
+  const busy = (err: unknown) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    return /agent_pane_busy/.test(msg);
+  };
+  for (let attempt = 0; attempt < 8; attempt++) {
+    try {
+      await herdrJson(startArgs);
+      break;
+    } catch (err) {
+      if (!busy(err) || attempt === 7) throw err;
+      await new Promise((r) => setTimeout(r, 80));
+    }
+  }
   await runner(["pane", "rename", paneId, spec.paneLabel]).catch(() => ({
     stdout: "",
     stderr: "",
@@ -527,18 +605,22 @@ export function formatSharedChannelPrompt(
 }
 
 async function promptSessionAndWait(slug: string, text: string): Promise<string | null> {
+  // Omit --until so herdr's default matches idle, done, or blocked.
+  // A single --until idle misses live pi sessions that settle at done.
   const result = await herdrJson([
     "agent",
     "prompt",
     slug,
     text,
     "--wait",
-    "--until",
-    "idle",
     "--timeout",
     PROMPT_TIMEOUT_MS,
   ]);
-  return replyTextFromPromptResult(result);
+  const fromWait = replyTextFromPromptResult(result);
+  if (fromWait) return fromWait;
+  if (!isSessionSlug(slug)) return null;
+  const dump = await readSessionSnapshot(slug);
+  return replyTextFromSessionRead(dump, text);
 }
 
 export async function deliverChannelPost(
