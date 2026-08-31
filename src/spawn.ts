@@ -34,8 +34,9 @@ export function agentSlug(bot: Pick<Bot, "id" | "name">): string {
 /** Identity injected into pi via `--system-prompt` on `herdr agent start`. */
 export function identitySystemPrompt(bot: Pick<Bot, "name" | "tag" | "description">): string {
   return [
-    `Your name is ${bot.name}. Your tag is ${bot.tag}. Role: ${bot.description}`,
-    "When asked who you are (你是谁), answer with this exact name and the role. Never replace the name with a generic title.",
+    `Your name is ${bot.name}. Description: ${bot.description}`,
+    `Internal tag: ${bot.tag} (not your title; do not say this when asked who you are).`,
+    "When asked who you are (你是谁), answer with this exact name and the description. Never replace the name with a generic title, and never introduce yourself as the tag.",
   ].join(" ");
 }
 

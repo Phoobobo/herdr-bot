@@ -142,8 +142,21 @@ test("identitySystemPrompt includes name, tag, and description", () => {
     expect(prompt).toContain(seed.description);
   }
   expect(identitySystemPrompt(DEFAULT_SEED_BOTS[0])).toBe(
-    "Your name is 幕僚长. Your tag is lead. Role: 管理你的其他 Bot，需要决策时找你 When asked who you are (你是谁), answer with this exact name and the role. Never replace the name with a generic title.",
+    "Your name is 幕僚长. Description: 管理你的其他 Bot，需要决策时找你 Internal tag: lead (not your title; do not say this when asked who you are). When asked who you are (你是谁), answer with this exact name and the description. Never replace the name with a generic title, and never introduce yourself as the tag.",
   );
+});
+
+test("研究员 prompt uses description for 你是谁, not the tag as a title", () => {
+  const seed = DEFAULT_SEED_BOTS.find((b) => b.name === "研究员")!;
+  const prompt = identitySystemPrompt(seed);
+  expect(prompt).toContain("Your name is 研究员");
+  expect(prompt).toContain(seed.description);
+  expect(prompt).toContain("GitHub");
+  expect(prompt).toContain("Internal tag: research");
+  expect(prompt).toContain("not your title");
+  expect(prompt).toContain("never introduce yourself as the tag");
+  expect(prompt).not.toMatch(/Role:\s*research/);
+  expect(prompt).not.toMatch(/Your tag is research\. Role:/);
 });
 
 test("研发工程师 prompt names the bot without two competing You are identities", () => {
