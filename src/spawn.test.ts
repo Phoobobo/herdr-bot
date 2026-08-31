@@ -2,11 +2,9 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { DEFAULT_MEMBER_NAMES } from "./types.ts";
-import { resumeDefaultTeam } from "./store.ts";
-import { USER_ID } from "./types.ts";
-import { agentSlug, deliverChannelPost, ensureTeamLive, formatChannelPrompt, formatDmPrompt, listLiveBots, openBot, sendComposer, setHerdrRunner } from "./spawn.ts";
-import { createChannel, getDm, loadOrSeedDefaultTeam, postToChannel } from "./store.ts";
+import { DEFAULT_MEMBER_NAMES, DEFAULT_SEED_BOTS, USER_ID } from "./types.ts";
+import { agentSlug, deliverChannelPost, ensureTeamLive, formatChannelPrompt, formatDmPrompt, identitySystemPrompt, listLiveBots, openBot, sendComposer, setHerdrRunner } from "./spawn.ts";
+import { createChannel, getDm, loadOrSeedDefaultTeam, postToChannel, resumeDefaultTeam, setBotDescription } from "./store.ts";
 
 let dir: string;
 let calls: string[][];
@@ -118,6 +116,55 @@ test("QA gate: ensureTeamLive puts all four default members live", async () => {
   const starts = calls.filter((c) => c[0] === "agent" && c[1] === "start");
   expect(starts.map((c) => c[2])).toEqual(["lead", "eng", "research", "qa"]);
   expect(starts.every((c) => c[c.indexOf("--kind") + 1] === "pi")).toBe(true);
+});
+
+test("QA gate: each agent start injects seed identity via --system-prompt", async () => {
+  await ensureTeamLive();
+  const starts = calls.filter((c) => c[0] === "agent" && c[1] === "start");
+  expect(starts).toHaveLength(4);
+  for (const seed of DEFAULT_SEED_BOTS) {
+    const start = starts.find((c) => c[2] === seed.id);
+    expect(start).toBeDefined();
+    const dash = start!.indexOf("--");
+    expect(dash).toBeGreaterThan(-1);
+    expect(start!.slice(dash, dash + 3)).toEqual(["--", "--system-prompt", identitySystemPrompt(seed)]);
+    expect(start![dash + 2]).toContain(seed.name);
+    expect(start![dash + 2]).toContain(seed.description);
+    expect(start![dash + 2]).toContain(seed.tag);
+  }
+});
+
+test("identitySystemPrompt includes name, tag, and description", () => {
+  for (const seed of DEFAULT_SEED_BOTS) {
+    const prompt = identitySystemPrompt(seed);
+    expect(prompt).toContain(seed.name);
+    expect(prompt).toContain(seed.tag);
+    expect(prompt).toContain(seed.description);
+  }
+  expect(identitySystemPrompt(DEFAULT_SEED_BOTS[0])).toBe(
+    "You are 幕僚长 (lead). 管理你的其他 Bot，需要决策时找你",
+  );
+});
+
+test("subsequent start of a not-live bot uses updated store identity", async () => {
+  resumeDefaultTeam();
+  setBotDescription("研发工程师", "Ships TypeScript without drama.");
+  await openBot("研发工程师");
+  const starts = calls.filter((c) => c[0] === "agent" && c[1] === "start");
+  expect(starts).toHaveLength(1);
+  const dash = starts[0].indexOf("--");
+  expect(starts[0].slice(dash, dash + 3)).toEqual([
+    "--",
+    "--system-prompt",
+    identitySystemPrompt({
+      name: "研发工程师",
+      tag: "eng",
+      description: "Ships TypeScript without drama.",
+    }),
+  ]);
+  expect(starts[0][dash + 2]).toContain("研发工程师");
+  expect(starts[0][dash + 2]).toContain("Ships TypeScript without drama.");
+  expect(starts[0][dash + 2]).not.toContain("You are an awesome software engineer.");
 });
 
 test("QA gate: each bot gets a dedicated named tab, never workspace root pane", async () => {

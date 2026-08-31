@@ -31,6 +31,11 @@ export function agentSlug(bot: Pick<Bot, "id" | "name">): string {
   throw new BotError("BAD_REQUEST", `bot id is not a valid herdr agent name: ${bot.id}`);
 }
 
+/** Identity injected into pi via `--system-prompt` on `herdr agent start`. */
+export function identitySystemPrompt(bot: Pick<Bot, "name" | "tag" | "description">): string {
+  return `You are ${bot.name} (${bot.tag}). ${bot.description}`.trim();
+}
+
 function unwrap(stdout: string): any {
   const lines = stdout
     .split(/\r?\n/)
@@ -172,7 +177,20 @@ async function ensurePane(team: Team, bot: Bot, workspaceId: string): Promise<st
 async function startHarness(bot: Bot, paneId: string): Promise<void> {
   const slug = agentSlug(bot);
   const kind = bot.body || "pi";
-  await herdrJson(["agent", "start", slug, "--kind", kind, "--pane", paneId, "--timeout", "30000"]);
+  await herdrJson([
+    "agent",
+    "start",
+    slug,
+    "--kind",
+    kind,
+    "--pane",
+    paneId,
+    "--timeout",
+    "30000",
+    "--",
+    "--system-prompt",
+    identitySystemPrompt(bot),
+  ]);
   await runner(["pane", "rename", paneId, bot.name]).catch(() => ({ stdout: "", stderr: "", exitCode: 0 }));
   await runner([
     "pane",
