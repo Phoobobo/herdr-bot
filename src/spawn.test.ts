@@ -492,10 +492,57 @@ const ENG_IM_READ_FIXTURE = `
 ↑1.2k ↓46 $0.000 (sub) 0.4%/272k (auto)        gpt-5.6-luna • high
 `;
 
-test("session read snapshot: last non-empty line after the prompt, not the Pi footer", () => {
+test("session read snapshot: single-line ping keeps the ack, drops thinking and Pi footer", () => {
   const prompt = formatDmPrompt("qa-im-ping-0901-a");
   expect(replyTextFromSessionRead(ENG_IM_READ_FIXTURE, prompt)).toBe("收到：qa-im-ping-0901-a");
   expect(replyTextFromSessionRead("pong", prompt)).toBe("pong");
+});
+
+// Live FAIL 2026-09-03: last wrap fragment `帮忙吗？` was stored instead of the pane sentence.
+const RESEARCH_IM_READ_FIXTURE = `
+ [dm] Phoobobo: 最近怎么样
+
+ Formulating casual Chinese greeting
+
+ 挺好的，随时待命！最近有 GitHub 项目、PR 或代码需要我
+ 帮忙吗？
+
+╭────────────────────────────────────────────────────────────────╮
+╰────────────────────────────────────────────────────────────────╯
+~/Workspace/herdr-bot (main)
+↑1.2k ↓46 $0.000 (sub) 0.4%/272k (auto)        gpt-5.6-luna • high
+`;
+
+test("session read snapshot: live Chinese wrap joins CJK fragments, drops thinking, not last wrap line", () => {
+  const prompt = formatDmPrompt("最近怎么样");
+  expect(replyTextFromSessionRead(RESEARCH_IM_READ_FIXTURE, prompt)).toBe(
+    "挺好的，随时待命！最近有 GitHub 项目、PR 或代码需要我帮忙吗？",
+  );
+  expect(replyTextFromSessionRead(RESEARCH_IM_READ_FIXTURE, prompt)).not.toBe("帮忙吗？");
+  expect(replyTextFromSessionRead(RESEARCH_IM_READ_FIXTURE, prompt)).not.toContain("Formulating");
+});
+
+const ENG_WRAP_READ_FIXTURE = `
+ [dm] Phoobobo: how are you
+
+ Drafting a short English offer
+
+ Sure, I can look at GitHub projects, PRs, or code if you need a hand
+ Can I help?
+
+╭────────────────────────────────────────────────────────────────╮
+╰────────────────────────────────────────────────────────────────╯
+~/Workspace/herdr-bot (main)
+↑1.2k ↓46 $0.000 (sub) 0.4%/272k (auto)        gpt-5.6-luna • high
+`;
+
+test("session read snapshot: English wrap joins fragments, not last line Can I help?", () => {
+  const prompt = formatDmPrompt("how are you");
+  expect(replyTextFromSessionRead(ENG_WRAP_READ_FIXTURE, prompt)).toBe(
+    "Sure, I can look at GitHub projects, PRs, or code if you need a hand Can I help?",
+  );
+  expect(replyTextFromSessionRead(ENG_WRAP_READ_FIXTURE, prompt)).not.toBe("Can I help?");
+  expect(replyTextFromSessionRead(ENG_WRAP_READ_FIXTURE, prompt)).not.toContain("Drafting");
 });
 
 test("sendComposer writes the reply when wait JSON is agent_status done with text", async () => {
@@ -529,6 +576,21 @@ test("sendComposer reads *-im snapshot when wait JSON is done with no body", asy
   const reads = calls.filter((c) => c[0] === "agent" && c[1] === "read");
   expect(reads.map((c) => c[2])).toEqual(["eng-im"]);
   expect(reads.some((c) => c[2] === "eng")).toBe(false);
+});
+
+test("sendComposer stores the full Chinese IM reply when wait JSON has no body", async () => {
+  promptAgentStatus = "done";
+  promptIncludeText = false;
+  readDump = RESEARCH_IM_READ_FIXTURE;
+  resumeDefaultTeam();
+  await sendComposer({ kind: "bot", index: 2 }, "最近怎么样");
+  const dm = getDm("research");
+  expect(dm.map((m) => `${m.from_bot_id}: ${m.text}`)).toEqual([
+    "user: 最近怎么样",
+    "research: 挺好的，随时待命！最近有 GitHub 项目、PR 或代码需要我帮忙吗？",
+  ]);
+  const reads = calls.filter((c) => c[0] === "agent" && c[1] === "read");
+  expect(reads.map((c) => c[2])).toEqual(["research-im"]);
 });
 
 test("sendComposer reads socket JSON .read.text when wait JSON has no body", async () => {

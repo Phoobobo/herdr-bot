@@ -138,23 +138,69 @@ function isSessionSlug(slug: string): boolean {
  * (`*-im` / `*-ch` only). CLI prints `.result.read.text` (socket field) as
  * UTF-8; it is a raw terminal snapshot, not a last-assistant-message object.
  *
- * Slice: last non-empty line after the submitted prompt in that snapshot.
- * Stop at the first box-drawing-only line so the Pi TUI footer (box / cwd /
- * token bar) is not taken as the reply. This is not extractReplyFor: no
- * thinking-line skip, no inbound-marker parse, no chrome paragraph walk.
+ * Slice: the entire visible assistant body after the submitted prompt.
+ * Drop Pi grey thinking lines, stop at the TUI footer (box / cwd / token
+ * bar / model bar), then join hard-wrapped fragments into paragraphs.
+ * This is not extractReplyFor: no inbound-marker parse, no chrome walk.
  */
 export function replyTextFromSessionRead(dump: string, prompt: string): string | null {
   if (!dump?.trim()) return null;
   const idx = prompt ? dump.lastIndexOf(prompt) : -1;
   const slice = idx >= 0 ? dump.slice(idx + prompt.length) : dump;
-  const collected: string[] = [];
-  for (const raw of slice.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (!line) continue;
-    if (/^[\s╭╮╰╯─│━]+$/.test(line)) break;
-    collected.push(line);
+  const lines = slice.split(/\r?\n/);
+  let i = 0;
+  while (i < lines.length && !lines[i].trim()) i++;
+  const paragraphs: string[][] = [];
+  let current: string[] | null = null;
+  for (; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (isPiFooterLine(line)) break;
+    if (!line) {
+      if (current?.length) {
+        paragraphs.push(current);
+        current = null;
+      }
+      continue;
+    }
+    if (isThinkingLine(line)) continue;
+    if (!current) current = [];
+    current.push(line);
   }
-  return collected.length ? collected[collected.length - 1] : null;
+  if (current?.length) paragraphs.push(current);
+  if (!paragraphs.length) return null;
+  return paragraphs.map(joinWrapFragments).join("\n\n");
+}
+
+/** Pi grey status: whole-line English present-participle phrase, no punctuation. */
+function isThinkingLine(line: string): boolean {
+  return /^[A-Z][A-Za-z]*ing(?:\s+[A-Za-z]+)+$/.test(line);
+}
+
+function isPiFooterLine(line: string): boolean {
+  if (/^[\s╭╮╰╯─│━]+$/.test(line)) return true;
+  if (/\btokens\s*\|/.test(line)) return true;
+  // cwd + branch, e.g. ~/Workspace/herdr-bot (main)
+  if (/^[~\/][^\s].*\s\([^)]+\)\s*$/.test(line)) return true;
+  // token / model bar: ↑1.2k ↓46 $0.000 … gpt-5.6-luna • high
+  if (/[↑↓]/.test(line) && /\$/.test(line)) return true;
+  if (/\bgpt-[\w.]+/.test(line) && /•/.test(line)) return true;
+  return false;
+}
+
+function isAsciiAlnum(ch: string | undefined): boolean {
+  return !!ch && /[A-Za-z0-9]/.test(ch);
+}
+
+function joinWrapFragments(parts: string[]): string {
+  let out = "";
+  for (const part of parts) {
+    if (!out) {
+      out = part;
+      continue;
+    }
+    out += isAsciiAlnum(out[out.length - 1]) && isAsciiAlnum(part[0]) ? ` ${part}` : part;
+  }
+  return out;
 }
 
 function snapshotTextFromReadStdout(stdout: string): string {
