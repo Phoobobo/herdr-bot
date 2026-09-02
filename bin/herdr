@@ -1,5 +1,6 @@
 #!/bin/sh
-# herdr-bot dispatcher. `herdr bots` -> herdr-bots. Everything else -> official herdr.
+# Local-dev dispatcher (this machine). `herdr bots` -> herdr-bots.
+# User entry is plugin action phoobobo.herdr-bot.bots, not this PATH shim.
 # Lives in the plugin bin/; do not install over ~/.local/bin/herdr.
 set -eu
 bindir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)

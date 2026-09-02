@@ -4,7 +4,7 @@ A team of bots that lives **inside** [herdr](https://herdr.dev) as a plugin over
 
 One **herdr-bot team** owns one **Herdr session**. The default team maps to the default Herdr session (`default`).
 
-When you type **`herdr bots`**, the default team resumes and an overlay TUI opens listing the four default members:
+When you invoke plugin action **`phoobobo.herdr-bot.bots`** (a keybind, or `herdr plugin action invoke`), the default team resumes and an overlay TUI opens listing the four default members:
 
 | name | tag | body | description |
 | ---- | --- | ---- | ----------- |
@@ -29,41 +29,63 @@ Once published:
 herdr plugin install Phoobobo/herdr-bot
 ```
 
-Local development:
+Then bind a shortcut to plugin action **`phoobobo.herdr-bot.bots`**. That is the supported entry for other users (same pattern as workboard). Install does **not** put `bin/herdr` on PATH; `herdr bots` after install is not required and is not a product fail.
+
+```toml
+[[keys.command]]
+key = "prefix+shift+b"
+type = "plugin_action"
+command = "phoobobo.herdr-bot.bots"
+description = "resume herdr-bot team"
+```
+
+Or invoke without a keybind:
+
+```bash
+herdr plugin action invoke phoobobo.herdr-bot.bots
+```
+
+Open the overlay directly:
+
+```bash
+herdr plugin pane open --plugin phoobobo.herdr-bot --entrypoint tui --placement overlay --focus
+```
+
+GitHub topic: **`herdr-plugin`** (required for the herdr marketplace index).
+
+## Local development
+
+Convenience for **this machine** only. Other users should not put `bin/herdr` on PATH.
 
 ```bash
 herdr plugin link /path/to/herdr-bot
 cd /path/to/herdr-bot
 bun install
 bun link                 # puts `herdr-bots` on PATH
-# plugin dispatcher so `herdr bots` works without a zsh function:
+# optional local dispatcher so `herdr bots` works here without a zsh function:
 export PATH="$HOME/Workspace/herdr-bot/bin:$PATH"
 ```
 
-GitHub topic: **`herdr-plugin`** (required for the herdr marketplace index).
-
-## How `herdr bots` works
-
-The product command is **`herdr bots`**. Herdr 0.8.2 has **no plugin CLI subcommands**, so this plugin ships its own `bin/herdr` dispatcher (git-style, from the plugin side — it does not patch herdr or replace `~/.local/bin/herdr`, which `herdr update` would clobber).
+`bin/herdr` is a git-style dispatcher kept for local development. It does not patch herdr or replace `~/.local/bin/herdr` (which `herdr update` would clobber). It is **not** the user entry.
 
 - `herdr bots …` → sibling `herdr-bots` (resume default team + overlay; `--no-open` / `--json` / subcommands work)
 - any other args → the official `herdr` found later on PATH (the dispatcher directory is skipped so it does not recurse)
 
-Put the plugin bin **first** on PATH so a new login pane (macOS Herdr panes are login shells) finds the dispatcher instead of `~/.local/bin/herdr`:
+On this machine, put the plugin bin **first** on PATH so a new login pane (macOS Herdr panes are login shells) finds the dispatcher instead of `~/.local/bin/herdr`:
 
 ```bash
 export PATH="$HOME/Workspace/herdr-bot/bin:$PATH"
 ```
 
-Local install/link should prepend that directory in `~/.zprofile` (after the `~/.local/bin` line, which would otherwise shadow it), `~/.zshenv` (non-login zsh), and `~/.zshrc`. Then:
+Local install/link can prepend that directory in `~/.zprofile` (after the `~/.local/bin` line, which would otherwise shadow it), `~/.zshenv` (non-login zsh), and `~/.zshrc`. Then:
 
 ```bash
-herdr bots                    # resume default team + open overlay
-herdr bots --no-open --json   # QA: members must be the four default names
+herdr bots                    # local-dev: resume default team + open overlay
+herdr bots --no-open --json   # local-dev QA: members must be the four default names
 herdr session list            # still official herdr
 ```
 
-`herdr-bots` remains the direct CLI (like workboard's `herdr-workboard`):
+`herdr-bots` remains the direct local CLI (like workboard's `herdr-workboard`):
 
 ```bash
 herdr-bots                 # resume default team + open overlay
@@ -71,19 +93,7 @@ herdr-bots bots list --json
 herdr-bots team show --json
 ```
 
-Plugin action `phoobobo.herdr-bot.bots` remains valid from inside herdr or scripts:
-
-```bash
-herdr plugin action invoke phoobobo.herdr-bot.bots
-```
-
-`shell/herdr.zsh` is an optional fallback if the plugin bin is not first on PATH. `scripts/herdr-bots.sh` is the same CLI via bun if `herdr-bots` is not on PATH.
-
-Open the overlay directly:
-
-```bash
-herdr plugin pane open --plugin phoobobo.herdr-bot --entrypoint tui --placement overlay --focus
-```
+`shell/herdr.zsh` is an optional local fallback if the plugin bin is not first on PATH. `scripts/herdr-bots.sh` is the same CLI via bun if `herdr-bots` is not on PATH.
 
 ## One team = one session
 
@@ -157,7 +167,7 @@ herdr-bots bots live --json        # QA: names must be the four, each live
 herdr-bots bots open 研发工程师 --json
 ```
 
-TUI send uses `herdr agent prompt <target> <text> --wait --timeout 120000` (IM → that bot's `{id}-im`; `#standup` → every member's `{id}-ch`) and writes the reply into the overlay store. `--until` is omitted so herdr's default accepts idle, done, or blocked. If the wait JSON has no message body (herdr 0.8.2), the same session slug is `agent read` and the last transcript line after the prompt is stored. There is still **one** `#standup` `messages[]`. The TUI path never prompts work slugs or uses `extractReplyFor`.
+TUI send uses `herdr agent prompt <target> <text> --wait --timeout 120000` (IM → that bot's `{id}-im`; `#standup` → every member's `{id}-ch`) and writes the reply into the overlay store. `--until` is omitted so herdr's default accepts idle, done, or blocked. If the wait JSON has no message body (herdr 0.8.2), the same session slug is `agent read` and the full assistant reply after the prompt is stored (thinking and Pi footer dropped; wrap fragments joined). There is still **one** `#standup` `messages[]`. The TUI path never prompts work slugs or uses `extractReplyFor`.
 
 ```bash
 herdr-bots channel create --name standup --json

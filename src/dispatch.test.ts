@@ -42,6 +42,9 @@ function dispatch(...args: string[]) {
   });
 }
 
+// Local-dev only. Plugin install does not put bin/herdr on PATH; that is not a
+// product fail. User entry is `herdr plugin action invoke phoobobo.herdr-bot.bots`
+// (or a [[keys.command]] type = "plugin_action" keybind).
 test("command -v herdr with plugin bin first resolves to the dispatcher", () => {
   const which = Bun.spawnSync(["sh", "-c", "command -v herdr"], {
     env: dispatchEnv(),
@@ -54,7 +57,7 @@ test("command -v herdr with plugin bin first resolves to the dispatcher", () => 
   expect(resolved).not.toBe(path.join(os.homedir(), ".local/bin/herdr"));
 });
 
-test("herdr bots --no-open --json via dispatcher resumes the default four members", () => {
+test("local-dev herdr bots --no-open --json via dispatcher resumes the default four members", () => {
   const proc = dispatch("bots", "--no-open", "--json");
   expect(proc.exitCode).toBe(0, proc.stderr.toString() || proc.stdout.toString());
   const body = JSON.parse(proc.stdout.toString() || proc.stderr.toString());
