@@ -545,6 +545,45 @@ test("session read snapshot: English wrap joins fragments, not last line Can I h
   expect(replyTextFromSessionRead(ENG_WRAP_READ_FIXTURE, prompt)).not.toContain("Drafting");
 });
 
+// Live FAIL 2026-09-03: pane hard-wrapped the submitted prompt, so lastIndexOf(fullPrompt)
+// was -1 and the Pi v0.84.2 title bar was stored as the reply.
+const PING_0903_TEXT = "qa-im-ping-0903-a，请用两句中文回复";
+const PROMPT_0903 = formatDmPrompt(PING_0903_TEXT);
+const SENTENCE_0903_A = "qa-im-ping-0903-a，我已收到你的消息。";
+const SENTENCE_0903_B = "qa-im-ping-0903-a，我会按要求用两句中文回复。";
+// Newline mid-token so the contiguous prompt substring is missing from the dump.
+const PI_WRAPPED_PROMPT_FIXTURE = `
+╭──────────────────────────────── Pi v0.84.2 ────────────────────────────────╮
+╭────────────────────────────────────────────────────────────────╮
+╰────────────────────────────────────────────────────────────────╯
+ [dm] Phoobobo: qa-im-ping-
+ 0903-a，请用两句中文回复
+
+ Formulating two Chinese sentences
+
+ qa-im-ping-0903-a，我已收到你的消息。
+ qa-im-ping-0903-a，我会按要求用两句中文回复。
+
+╭────────────────────────────────────────────────────────────────╮
+╰────────────────────────────────────────────────────────────────╯
+~/Workspace/herdr-bot (main)
+↑1.2k ↓46 $0.000 (sub) 0.4%/272k (auto)        gpt-5.6-luna • high
+`;
+
+test("session read snapshot: wrapped prompt + Pi frame yields two Chinese sentences", () => {
+  expect(PROMPT_0903).toBe("[dm] Phoobobo: qa-im-ping-0903-a，请用两句中文回复");
+  expect(PI_WRAPPED_PROMPT_FIXTURE.lastIndexOf(PROMPT_0903)).toBe(-1);
+  expect(PI_WRAPPED_PROMPT_FIXTURE).toContain("Pi v0.84.2");
+  const reply = replyTextFromSessionRead(PI_WRAPPED_PROMPT_FIXTURE, PROMPT_0903);
+  expect(reply).toBe(`${SENTENCE_0903_A}\n${SENTENCE_0903_B}`);
+  expect(reply).not.toContain("Pi v0.84.2");
+  expect(reply).not.toContain("╭");
+  expect(reply).not.toContain("╮");
+  expect(reply).not.toContain("╰");
+  expect(reply).not.toContain("╯");
+  expect(reply).not.toContain("Formulating");
+});
+
 test("sendComposer writes the reply when wait JSON is agent_status done with text", async () => {
   promptAgentStatus = "done";
   promptIncludeText = true;
@@ -589,6 +628,23 @@ test("sendComposer stores the full Chinese IM reply when wait JSON has no body",
     "user: 最近怎么样",
     "research: 挺好的，随时待命！最近有 GitHub 项目、PR 或代码需要我帮忙吗？",
   ]);
+  const reads = calls.filter((c) => c[0] === "agent" && c[1] === "read");
+  expect(reads.map((c) => c[2])).toEqual(["research-im"]);
+});
+
+test("sendComposer stores two Chinese sentences from wrapped-prompt snapshot, not Pi frame", async () => {
+  promptAgentStatus = "done";
+  promptIncludeText = false;
+  readDump = PI_WRAPPED_PROMPT_FIXTURE;
+  resumeDefaultTeam();
+  await sendComposer({ kind: "bot", index: 2 }, PING_0903_TEXT);
+  const dm = getDm("research");
+  expect(dm.map((m) => `${m.from_bot_id}: ${m.text}`)).toEqual([
+    `user: ${PING_0903_TEXT}`,
+    `research: ${SENTENCE_0903_A}\n${SENTENCE_0903_B}`,
+  ]);
+  expect(dm[1].text).not.toContain("Pi v0.84.2");
+  expect(dm[1].text).not.toContain("╭");
   const reads = calls.filter((c) => c[0] === "agent" && c[1] === "read");
   expect(reads.map((c) => c[2])).toEqual(["research-im"]);
 });

@@ -138,23 +138,25 @@ function isSessionSlug(slug: string): boolean {
  * (`*-im` / `*-ch` only). CLI prints `.result.read.text` (socket field) as
  * UTF-8; it is a raw terminal snapshot, not a last-assistant-message object.
  *
- * Slice: the entire visible assistant body after the submitted prompt.
- * Drop Pi grey thinking lines, stop at the TUI footer (box / cwd / token
- * bar / model bar), then join hard-wrapped fragments into paragraphs.
- * This is not extractReplyFor: no inbound-marker parse, no chrome walk.
+ * Slice: find the submitted prompt even when the pane hard-wraps it, then take
+ * the visible assistant body after that inbound. Drop Pi grey thinking lines
+ * and TUI chrome (any box-drawing line, including a Pi v0.x title bar, plus
+ * cwd / token / model bars). Wrap-join unfinished fragments; keep finished
+ * sentences on separate lines. This is not extractReplyFor.
  */
 export function replyTextFromSessionRead(dump: string, prompt: string): string | null {
   if (!dump?.trim()) return null;
-  const idx = prompt ? dump.lastIndexOf(prompt) : -1;
-  const slice = idx >= 0 ? dump.slice(idx + prompt.length) : dump;
+  const slice = sliceAfterPrompt(dump, prompt);
   const lines = slice.split(/\r?\n/);
-  let i = 0;
-  while (i < lines.length && !lines[i].trim()) i++;
   const paragraphs: string[][] = [];
   let current: string[] | null = null;
-  for (; i < lines.length; i++) {
+  let bodyStarted = false;
+  for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
-    if (isPiFooterLine(line)) break;
+    if (isChromeLine(line)) {
+      if (bodyStarted) break;
+      continue;
+    }
     if (!line) {
       if (current?.length) {
         paragraphs.push(current);
@@ -163,6 +165,7 @@ export function replyTextFromSessionRead(dump: string, prompt: string): string |
       continue;
     }
     if (isThinkingLine(line)) continue;
+    bodyStarted = true;
     if (!current) current = [];
     current.push(line);
   }
@@ -176,8 +179,12 @@ function isThinkingLine(line: string): boolean {
   return /^[A-Z][A-Za-z]*ing(?:\s+[A-Za-z]+)+$/.test(line);
 }
 
-function isPiFooterLine(line: string): boolean {
-  if (/^[\s╭╮╰╯─│━]+$/.test(line)) return true;
+const BOX_DRAWING = /[\u2500-\u257F]/;
+const SENTENCE_END = /[。．.！!？?…]$/;
+
+function isChromeLine(line: string): boolean {
+  if (!line) return false;
+  if (BOX_DRAWING.test(line)) return true;
   if (/\btokens\s*\|/.test(line)) return true;
   // cwd + branch, e.g. ~/Workspace/herdr-bot (main)
   if (/^[~\/][^\s].*\s\([^)]+\)\s*$/.test(line)) return true;
@@ -185,6 +192,10 @@ function isPiFooterLine(line: string): boolean {
   if (/[↑↓]/.test(line) && /\$/.test(line)) return true;
   if (/\bgpt-[\w.]+/.test(line) && /•/.test(line)) return true;
   return false;
+}
+
+function looksFinished(s: string): boolean {
+  return SENTENCE_END.test(s);
 }
 
 function isAsciiAlnum(ch: string | undefined): boolean {
@@ -198,9 +209,108 @@ function joinWrapFragments(parts: string[]): string {
       out = part;
       continue;
     }
+    if (looksFinished(out)) {
+      out += `\n${part}`;
+      continue;
+    }
     out += isAsciiAlnum(out[out.length - 1]) && isAsciiAlnum(part[0]) ? ` ${part}` : part;
   }
   return out;
+}
+
+/**
+ * Locate the submitted prompt in a TUI dump. The pane may hard-wrap it, so a
+ * contiguous lastIndexOf(prompt) can miss. Collapse dump lines with the same
+ * wrap-join as the body and take text after that match. If the full prompt is
+ * still missing, use a distinctive suffix (last prompt line, or [dm]/[#ch]
+ * inbound). Never fall back to scanning from the top when that would pick the
+ * Pi frame; only a chrome-free dump (e.g. a bare "pong") is used as-is.
+ */
+function sliceAfterPrompt(dump: string, prompt: string): string {
+  if (!prompt) return dump;
+  const idx = dump.lastIndexOf(prompt);
+  if (idx >= 0) return dump.slice(idx + prompt.length);
+
+  const wrapped = sliceAfterCollapsedPrompt(dump, prompt);
+  if (wrapped != null) return wrapped;
+
+  const suffix = sliceAfterDistinctiveSuffix(dump, prompt);
+  if (suffix != null) return suffix;
+
+  return dump;
+}
+
+function joinWrapMapped(pieces: { line: number; text: string }[]): { text: string; lineAt: number[] } {
+  let text = "";
+  const lineAt: number[] = [];
+  for (const piece of pieces) {
+    if (!piece.text) continue;
+    if (text) {
+      if (isAsciiAlnum(text[text.length - 1]) && isAsciiAlnum(piece.text[0])) {
+        text += " ";
+        lineAt.push(piece.line);
+      }
+    }
+    text += piece.text;
+    for (let i = 0; i < piece.text.length; i++) lineAt.push(piece.line);
+  }
+  return { text, lineAt };
+}
+
+function sliceAfterCollapsedPrompt(dump: string, prompt: string): string | null {
+  const needle = joinWrapFragments(
+    prompt.split(/\r?\n/).map((l) => l.trim()).filter(Boolean),
+  );
+  if (!needle) return null;
+  const lines = dump.split(/\r?\n/);
+  const pieces: { line: number; text: string }[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const text = lines[i].trim();
+    if (text) pieces.push({ line: i, text });
+  }
+  const collapsed = joinWrapMapped(pieces);
+  const idx = collapsed.text.lastIndexOf(needle);
+  if (idx < 0) return null;
+  const lastLine = collapsed.lineAt[idx + needle.length - 1];
+  if (lastLine == null) return "";
+  return lines.slice(lastLine + 1).join("\n");
+}
+
+function sliceAfterDistinctiveSuffix(dump: string, prompt: string): string | null {
+  const promptLines = prompt.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const lastPromptLine = promptLines[promptLines.length - 1];
+  if (lastPromptLine && lastPromptLine !== prompt.trim()) {
+    const idx = dump.lastIndexOf(lastPromptLine);
+    if (idx >= 0) return dump.slice(idx + lastPromptLine.length);
+  }
+
+  const markerMatch = prompt.match(/\[(?:dm|#[^\]]+)\]\s+\S+:/);
+  if (!markerMatch) return null;
+  const markerIdx = dump.lastIndexOf(markerMatch[0]);
+  if (markerIdx < 0) return null;
+
+  const lines = dump.split(/\r?\n/);
+  let pos = 0;
+  let startLine = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const end = pos + lines[i].length;
+    if (markerIdx >= pos && markerIdx <= end) {
+      startLine = i;
+      break;
+    }
+    pos = end + 1;
+  }
+  if (startLine < 0) return null;
+
+  const compactPrompt = prompt.replace(/\s+/g, "");
+  let acc = "";
+  let i = startLine;
+  while (i < lines.length) {
+    acc += lines[i].replace(/\s+/g, "");
+    i++;
+    if (acc.includes(compactPrompt)) break;
+  }
+  return lines.slice(i).join("\n");
 }
 
 function snapshotTextFromReadStdout(stdout: string): string {
