@@ -47,6 +47,16 @@ export interface ChannelMessage {
   from_bot_id: string;
   text: string;
   created_at: number;
+  /**
+   * Id of the message this one answers (bot replies only). Optional: records
+   * written before reply_to existed have no link and render as plain messages.
+   */
+  reply_to?: string | null;
+}
+
+export interface PostOptions {
+  /** Id of the message being answered. */
+  reply_to?: string | null;
 }
 
 export interface Channel {

@@ -19,6 +19,7 @@ import {
   type Bot,
   type Channel,
   type ChannelMessage,
+  type PostOptions,
   type Team,
 } from "./types.ts";
 
@@ -433,29 +434,39 @@ export function resolveFrom(team: Team, fromIdOrName: string): { id: string; nam
   return { id: bot.id, name: bot.name };
 }
 
-export function postToChannel(channel: string, fromBot: string, text: string): ChannelMessage;
-export function postToChannel(team: Team, channel: string, fromBot: string, text: string): ChannelMessage;
+export function postToChannel(channel: string, fromBot: string, text: string, opts?: PostOptions): ChannelMessage;
+export function postToChannel(team: Team, channel: string, fromBot: string, text: string, opts?: PostOptions): ChannelMessage;
 export function postToChannel(
   teamOrChannel: Team | string,
   channelOrFrom: string,
   fromOrText: string,
-  text?: string,
+  textOrOpts?: string | PostOptions,
+  maybeOpts?: PostOptions,
 ): ChannelMessage {
-  const team = typeof teamOrChannel === "string" ? loadState() : syncAliases(teamOrChannel);
-  const channel = typeof teamOrChannel === "string" ? teamOrChannel : channelOrFrom;
-  const fromBot = typeof teamOrChannel === "string" ? channelOrFrom : fromOrText;
-  const msgText = typeof teamOrChannel === "string" ? fromOrText : text ?? "";
+  const byName = typeof teamOrChannel === "string";
+  const team = byName ? loadState() : syncAliases(teamOrChannel);
+  const channel = byName ? teamOrChannel : channelOrFrom;
+  const fromBot = byName ? channelOrFrom : fromOrText;
+  const msgText = byName ? fromOrText : (typeof textOrOpts === "string" ? textOrOpts : "");
+  const opts = byName ? (typeof textOrOpts === "object" ? textOrOpts : undefined) : maybeOpts;
   const ch = findChannel(team, channel);
   const from = resolveFrom(team, fromBot);
-  const msg: ChannelMessage = {
-    id: newId("msg"),
-    from_bot_id: from.id,
-    text: msgText,
-    created_at: now(),
-  };
+  const msg = makeMessage(from.id, msgText, opts);
   ch.messages.push(msg);
   ch.updated_at = msg.created_at;
   saveTeam(team);
+  return msg;
+}
+
+function makeMessage(fromId: string, text: string, opts?: PostOptions): ChannelMessage {
+  const msg: ChannelMessage = {
+    id: newId("msg"),
+    from_bot_id: fromId,
+    text,
+    created_at: now(),
+  };
+  // Only set when known, so records without a link stay byte-identical to the old shape.
+  if (opts?.reply_to) msg.reply_to = opts.reply_to;
   return msg;
 }
 
@@ -468,26 +479,24 @@ export function getDm(teamOrBot: Team | string, botId?: string): ChannelMessage[
   return team.dms?.[bot.id] ?? [];
 }
 
-export function postToDm(botId: string, fromIdOrName: string, text: string): ChannelMessage;
-export function postToDm(team: Team, botId: string, fromIdOrName: string, text: string): ChannelMessage;
+export function postToDm(botId: string, fromIdOrName: string, text: string, opts?: PostOptions): ChannelMessage;
+export function postToDm(team: Team, botId: string, fromIdOrName: string, text: string, opts?: PostOptions): ChannelMessage;
 export function postToDm(
   teamOrBot: Team | string,
   botOrFrom: string,
   fromOrText?: string,
-  text?: string,
+  textOrOpts?: string | PostOptions,
+  maybeOpts?: PostOptions,
 ): ChannelMessage {
-  const team = typeof teamOrBot === "string" ? loadState() : syncAliases(teamOrBot);
-  const botId = typeof teamOrBot === "string" ? teamOrBot : botOrFrom;
-  const fromIdOrName = typeof teamOrBot === "string" ? botOrFrom : fromOrText!;
-  const msgText = typeof teamOrBot === "string" ? fromOrText ?? "" : text ?? "";
+  const byId = typeof teamOrBot === "string";
+  const team = byId ? loadState() : syncAliases(teamOrBot);
+  const botId = byId ? teamOrBot : botOrFrom;
+  const fromIdOrName = byId ? botOrFrom : fromOrText!;
+  const msgText = byId ? fromOrText ?? "" : (typeof textOrOpts === "string" ? textOrOpts : "");
+  const opts = byId ? (typeof textOrOpts === "object" ? textOrOpts : undefined) : maybeOpts;
   const bot = findBot(team, botId);
   const from = resolveFrom(team, fromIdOrName);
-  const msg: ChannelMessage = {
-    id: newId("msg"),
-    from_bot_id: from.id,
-    text: msgText,
-    created_at: now(),
-  };
+  const msg = makeMessage(from.id, msgText, opts);
   team.dms ||= {};
   team.dms[bot.id] ||= [];
   team.dms[bot.id].push(msg);

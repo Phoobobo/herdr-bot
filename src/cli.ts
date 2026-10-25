@@ -244,9 +244,10 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       const team = store.resumeDefaultTeam();
       const bot = store.findBot(team, target);
       const message = store.postToDm(bot.id, USER_ID, text);
-      await deliverDmPost(bot.id, text);
+      await deliverDmPost(bot.id, text, message.id);
       const thread = store.resumeDefaultTeam().dms?.[bot.id] ?? [];
-      const reply = thread.filter((m) => m.from_bot_id === bot.id && m.created_at >= message.created_at).pop() ?? null;
+      // Match by reply_to so a concurrent DM's reply is never reported as ours.
+      const reply = thread.find((m) => m.from_bot_id === bot.id && m.reply_to === message.id) ?? null;
       writeJson({ ok: true, bot: bot.id, message, reply });
       return 0;
     }
@@ -274,7 +275,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
           throw new BotError("BAD_REQUEST", "usage: herdr-bots channel post <channel> --from <bot> --text <text>");
         }
         const message = store.postToChannel(channel, from, text);
-        const delivery = await deliverChannelPost(channel, from, text);
+        const delivery = await deliverChannelPost(channel, from, text, message.id);
         writeJson({ ok: true, message, delivery });
         return 0;
       }

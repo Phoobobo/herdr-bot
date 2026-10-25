@@ -198,3 +198,30 @@ test("concurrent processes posting DMs never lose a message", async () => {
     expect(getDm(b).map((m) => m.text)).toEqual(Array.from({ length: 15 }, (_, i) => `${b}-${i}`));
   }
 }, 30000);
+
+test("reply_to: set on replies when given, omitted otherwise, and old records without it still load", () => {
+  resumeDefaultTeam();
+  createChannel({ name: "standup" });
+  const q = postToDm("lead", "user", "question");
+  const a = postToDm("lead", "lead", "answer", { reply_to: q.id });
+  expect(q.reply_to).toBeUndefined();
+  expect("reply_to" in q).toBe(false);
+  expect(a.reply_to).toBe(q.id);
+  const team = loadOrSeedDefaultTeam();
+  const t = postToDm(team, "lead", "lead", "team-form answer", { reply_to: q.id });
+  expect(t.reply_to).toBe(q.id);
+  expect(getDm("lead").map((m) => m.reply_to ?? null)).toEqual([null, q.id, q.id]);
+
+  const post = postToChannel("standup", "user", "hi");
+  const r = postToChannel("standup", "eng", "hey", { reply_to: post.id });
+  expect(r.reply_to).toBe(post.id);
+  expect(loadOrSeedDefaultTeam().channels[0].messages.map((m) => m.reply_to ?? null)).toEqual([null, post.id]);
+
+  // Backward compat: a record written before reply_to existed.
+  const legacy = loadOrSeedDefaultTeam();
+  legacy.dms!.lead.push({ id: "msg_old", from_bot_id: "lead", text: "old reply", created_at: 1 });
+  saveTeam(legacy);
+  const old = getDm("lead").find((m) => m.id === "msg_old")!;
+  expect(old.text).toBe("old reply");
+  expect(old.reply_to).toBeUndefined();
+});

@@ -932,6 +932,8 @@ export async function deliverChannelPost(
   channel: string,
   fromIdOrName: string,
   text: string,
+  /** Id of the stored post being delivered; each bot reply links back to it. */
+  replyTo?: string | null,
 ): Promise<{ delivered: LiveMember[]; skipped: Array<LiveMember & { reason?: string }> }> {
   const team = store.resumeDefaultTeam();
   const ch = store.findChannel(team, channel);
@@ -967,7 +969,7 @@ export async function deliverChannelPost(
       );
       const prompt = formatSharedChannelPrompt(liveCh.name, from.name, text, thread);
       const reply = await promptSessionAndWait(bot, slug, prompt, agents);
-      if (reply) store.postToChannel(ch.id, bot.id, reply);
+      if (reply) store.postToChannel(ch.id, bot.id, reply, { reply_to: replyTo ?? null });
       delivered.push(row);
     } catch (err) {
       skipped.push({ ...row, reason: err instanceof Error ? err.message : String(err) });
@@ -976,14 +978,19 @@ export async function deliverChannelPost(
   return { delivered, skipped };
 }
 
-export async function deliverDmPost(botIdOrName: string, text: string): Promise<Bot> {
+export async function deliverDmPost(
+  botIdOrName: string,
+  text: string,
+  /** Id of the stored user DM being answered; set as the reply's reply_to. */
+  replyTo?: string | null,
+): Promise<Bot> {
   const target = store.findBot(store.resumeDefaultTeam(), botIdOrName);
   // Lock covers open + prompt + read so a second quick DM can neither race the
   // pane start (two minted sessions) nor land mid-turn.
   return withSlugLock(imAgentSlug(target), async () => {
     const bot = await openBot(target.id);
     const reply = await promptSessionAndWaitUnlocked(bot, imAgentSlug(bot), formatDmPrompt(text));
-    if (reply) store.postToDm(bot.id, bot.id, reply);
+    if (reply) store.postToDm(bot.id, bot.id, reply, { reply_to: replyTo ?? null });
     return bot;
   });
 }
@@ -999,13 +1006,13 @@ export async function sendComposer(
     const bot = team.members[sel.index];
     if (!bot) throw new BotError("BOT_NOT_FOUND", "no bot selected");
     const msg = store.postToDm(bot.id, USER_ID, trimmed);
-    await deliverDmPost(bot.id, trimmed);
+    await deliverDmPost(bot.id, trimmed, msg.id);
     return msg;
   }
   const ch = team.channels[sel.index];
   if (!ch) throw new BotError("CHANNEL_NOT_FOUND", "no channel selected");
   const msg = store.postToChannel(ch.id, USER_ID, trimmed);
-  await deliverChannelPost(ch.id, USER_ID, trimmed);
+  await deliverChannelPost(ch.id, USER_ID, trimmed, msg.id);
   return msg;
 }
 

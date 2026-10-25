@@ -13,6 +13,7 @@ import {
   agentSlug,
   chAgentSlug,
   deliverChannelPost,
+  deliverDmPost,
   ensureTeamLive,
   formatChannelPrompt,
   formatDmPrompt,
@@ -31,6 +32,7 @@ import {
   getDm,
   loadOrSeedDefaultTeam,
   postToChannel,
+  postToDm,
   resumeDefaultTeam,
   setBody,
   setBotDescription,
@@ -934,6 +936,37 @@ test("two quick TUI DMs to one bot are serialized and never cross replies", asyn
   // Both user lines are stored first (composer echo), then each reply in send order.
   expect(dm.filter((m) => m.from_bot_id === "user").map((m) => m.text)).toEqual(["message one", "message two"]);
   expect(dm.filter((m) => m.from_bot_id === "eng").map((m) => m.text)).toEqual([MULTILINE_REPLY, CODE_BLOCK_REPLY]);
+  // Stored Q,Q,A,A: each reply links to the question it answers.
+  expect(dm.map((m) => m.from_bot_id)).toEqual(["user", "user", "eng", "eng"]);
+  const [q1, q2, a1, a2] = dm;
+  expect(a1.reply_to).toBe(q1.id);
+  expect(a2.reply_to).toBe(q2.id);
+  expect(q1.reply_to).toBeUndefined();
+  expect(q2.reply_to).toBeUndefined();
+});
+
+test("reply_to: TUI DM and channel replies link to the user post; CLI dm path (deliverDmPost) too", async () => {
+  await ensureTeamLive();
+  const dmQ = await sendComposer({ kind: "bot", index: 0 }, "hello lead");
+  const dmA = getDm("lead").find((m) => m.from_bot_id === "lead")!;
+  expect(dmA.reply_to).toBe(dmQ!.id);
+
+  const chQ = await sendComposer({ kind: "channel", index: 0 }, "hi team");
+  const ch = loadOrSeedDefaultTeam().channels[0];
+  const replies = ch.messages.filter((m) => m.from_bot_id !== USER_ID);
+  expect(replies).toHaveLength(4);
+  expect(replies.every((m) => m.reply_to === chQ!.id)).toBe(true);
+
+  // `herdr-bots dm` stores the user message, then passes its id to deliverDmPost.
+  const cliQ = postToDm("eng", USER_ID, "from cli");
+  await deliverDmPost("eng", "from cli", cliQ.id);
+  const cliA = getDm("eng").filter((m) => m.from_bot_id === "eng").pop()!;
+  expect(cliA.reply_to).toBe(cliQ.id);
+
+  // Callers that pass no id (older code paths) still store a plain reply.
+  await deliverDmPost("eng", "no link");
+  const plain = getDm("eng").filter((m) => m.from_bot_id === "eng").pop()!;
+  expect(plain.reply_to).toBeUndefined();
 });
 
 test("HERDR_BOT_GROK_TRUST=1 adds grok's --trust (opt-in; off by default)", async () => {
