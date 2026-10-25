@@ -19,6 +19,7 @@ import {
   setBotDescription,
   setBotTag,
   setModel,
+  saveTeam,
 } from "./store.ts";
 
 let dir: string;
@@ -157,3 +158,43 @@ test("postToChannel from lead still works", () => {
   expect(reloaded.channels[0].messages[0].from_bot_id).toBe("lead");
   expect(reloaded.channels[0].messages[0].text).toBe("hello team");
 });
+
+test("saving a stale team snapshot keeps DMs and grok sessions written meanwhile", () => {
+  const stale = resumeDefaultTeam();
+  const fresh = resumeDefaultTeam();
+  fresh.members[1].grok_sessions = { im: "01a173e3-470b-73ab-80e8-e39f64ace877" };
+  saveTeam(fresh);
+  postToDm("eng", USER_ID, "first");
+  postToDm("eng", "eng", "reply one");
+  stale.workspace_id = "w9";
+  saveTeam(stale);
+  const after = resumeDefaultTeam();
+  expect(after.workspace_id).toBe("w9");
+  expect(getDm("eng").map((m) => m.text)).toEqual(["first", "reply one"]);
+  expect(after.members[1].grok_sessions?.im).toBe("01a173e3-470b-73ab-80e8-e39f64ace877");
+  expect(fs.readdirSync(dir).some((f) => f.endsWith(".lock"))).toBe(false);
+});
+
+test("concurrent processes posting DMs never lose a message", async () => {
+  resumeDefaultTeam();
+  const script = path.join(dir, "post.ts");
+  const storePath = path.resolve(import.meta.dir, "store.ts");
+  fs.writeFileSync(
+    script,
+    `import { postToDm } from ${JSON.stringify(storePath)};\n` +
+      `const [bot, n] = process.argv.slice(2);\n` +
+      `for (let i = 0; i < Number(n); i++) postToDm(bot, "user", bot + "-" + i);\n`,
+  );
+  const bots = ["lead", "eng", "research", "qa"];
+  const procs = bots.map((b) =>
+    Bun.spawn(["bun", "run", script, b, "15"], {
+      env: { ...process.env, HERDR_BOT_STATE_DIR: dir },
+      stdout: "ignore",
+      stderr: "inherit",
+    }),
+  );
+  expect(await Promise.all(procs.map((p) => p.exited))).toEqual([0, 0, 0, 0]);
+  for (const b of bots) {
+    expect(getDm(b).map((m) => m.text)).toEqual(Array.from({ length: 15 }, (_, i) => `${b}-${i}`));
+  }
+}, 30000);

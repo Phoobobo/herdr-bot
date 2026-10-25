@@ -36,7 +36,15 @@ export type HerdrRunner = (args: string[]) => Promise<RunResult>;
 
 const WORKSPACE_LABEL = "herdr-bots";
 const BOTS_TAB_LABEL = "bots";
-const CWD = "/Users/phoobobo/Workspace/herdr-bot";
+const LEGACY_CWD = "/Users/phoobobo/Workspace/herdr-bot";
+/**
+ * Working dir for bot panes and the bots TUI: HERDR_BOT_CWD, else the original
+ * Mac checkout when it exists, else this checkout (e.g. a Linux box).
+ */
+function botCwd(): string {
+  if (process.env.HERDR_BOT_CWD) return process.env.HERDR_BOT_CWD;
+  return fs.existsSync(LEGACY_CWD) ? LEGACY_CWD : path.resolve(import.meta.dir, "..");
+}
 const PANE_WORK = "work";
 const PANE_IM = "instant-msg";
 const PANE_CH = "channel";
@@ -440,7 +448,7 @@ async function ensureWorkspace(team: Team): Promise<string> {
     "workspace",
     "create",
     "--cwd",
-    CWD,
+    botCwd(),
     "--label",
     WORKSPACE_LABEL,
     "--no-focus",
@@ -512,7 +520,7 @@ async function ensureBotTab(bot: Bot, workspaceId: string): Promise<{ tabId: str
     "--workspace",
     workspaceId,
     "--cwd",
-    CWD,
+    botCwd(),
     "--label",
     bot.name,
     "--no-focus",
@@ -557,8 +565,13 @@ export function harnessArgs(bot: Bot, session: "work" | "im" | "channel"): strin
     sessions[sk] = id;
     bot.grok_sessions = sessions;
   }
-  const sessionArgs = findGrokSessionDir(id, CWD) ? ["--resume", id] : ["--session-id", id];
-  return [...sessionArgs, "--model", store.botModel(bot), "--rules", prompt];
+  const sessionArgs = findGrokSessionDir(id, botCwd()) ? ["--resume", id] : ["--session-id", id];
+  // Grok asks "Do you trust the contents of this directory?" on first launch
+  // in an untrusted folder, and herdr reports that screen as idle, so a prompt
+  // would be typed into the dialog. Opt in with HERDR_BOT_GROK_TRUST=1 to pass
+  // grok's `--trust` (persists the grant), or trust the folder once by hand.
+  const trust = process.env.HERDR_BOT_GROK_TRUST === "1" ? ["--trust"] : [];
+  return [...sessionArgs, ...trust, "--model", store.botModel(bot), "--rules", prompt];
 }
 
 async function startAgent(
@@ -644,7 +657,7 @@ export async function openBotsTui(): Promise<void> {
     running = false;
   }
   if (!running) {
-    const run = await runner(["pane", "run", paneId, "bun", "run", `${CWD}/src/tui.ts`]);
+    const run = await runner(["pane", "run", paneId, "bun", "run", `${botCwd()}/src/tui.ts`]);
     if (run.exitCode !== 0) {
       const overlay = await runner([
         "plugin",
@@ -890,7 +903,7 @@ async function promptSessionAndWaitUnlocked(
     if (!sessionId) {
       throw new BotError("GROK_SESSION", `no grok session id for ${slug}; restart it with \`herdr-bots bots open ${bot.id}\``);
     }
-    offset = grokUpdatesOffset(sessionId, CWD);
+    offset = grokUpdatesOffset(sessionId, botCwd());
   }
   // Omit --until so herdr's default matches idle, done, or blocked.
   // A single --until idle misses live pi sessions that settle at done.
@@ -906,7 +919,7 @@ async function promptSessionAndWaitUnlocked(
   if (grok && sessionId) {
     // Structured write-back: the turn's agent_message_chunk text, verbatim.
     // Bound to this prompt's own turn (user text match), not "whatever came last".
-    return waitForGrokReply(sessionId, offset, { cwd: CWD, prompt: text });
+    return waitForGrokReply(sessionId, offset, { cwd: botCwd(), prompt: text });
   }
   const fromWait = replyTextFromPromptResult(result);
   if (fromWait) return fromWait;

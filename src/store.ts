@@ -107,10 +107,101 @@ export function seedTeam(): Team {
   });
 }
 
+const STATE_LOCK_STALE_MS = 30_000;
+const STATE_LOCK_TIMEOUT_MS = 60_000;
+let stateLockDepth = 0;
+
+/**
+ * Cross-process lock around team.json writes (mkdir lock next to the file).
+ * Several herdr-bots processes (TUI, `herdr-bots dm`, actions) write the same
+ * file; without it a stale snapshot could clobber another process's message.
+ * Re-entrant within a process.
+ */
+export function withStateLock<T>(fn: () => T): T {
+  if (stateLockDepth > 0) return fn();
+  const lock = `${stateFile()}.lock`;
+  fs.mkdirSync(path.dirname(lock), { recursive: true });
+  const sleeper = new Int32Array(new SharedArrayBuffer(4));
+  const deadline = Date.now() + STATE_LOCK_TIMEOUT_MS;
+  for (;;) {
+    try {
+      fs.mkdirSync(lock);
+      break;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;
+      try {
+        if (Date.now() - fs.statSync(lock).mtimeMs > STATE_LOCK_STALE_MS) {
+          fs.rmSync(lock, { recursive: true, force: true });
+          continue;
+        }
+      } catch {
+        continue;
+      }
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${lock}`);
+      Atomics.wait(sleeper, 0, 0, 10);
+    }
+  }
+  stateLockDepth++;
+  try {
+    return fn();
+  } finally {
+    stateLockDepth--;
+    fs.rmSync(lock, { recursive: true, force: true });
+  }
+}
+
+function mergeMessages(into: ChannelMessage[], disk: ChannelMessage[] | undefined): ChannelMessage[] {
+  if (!disk?.length) return into;
+  const seen = new Set(into.map((m) => m.id));
+  const missing = disk.filter((m) => m && !seen.has(m.id));
+  if (!missing.length) return into;
+  return [...into, ...missing]
+    .map((m, i) => ({ m, i }))
+    .sort((a, b) => (a.m.created_at ?? 0) - (b.m.created_at ?? 0) || a.i - b.i)
+    .map((x) => x.m);
+}
+
+/**
+ * Fold what other processes wrote since `team` was loaded: messages (DMs and
+ * channel posts are append-only, keyed by id) and pinned grok session ids the
+ * snapshot does not have yet. Everything else in the snapshot wins.
+ */
+function mergeFromDisk(team: Team): void {
+  let disk: Team;
+  try {
+    disk = JSON.parse(fs.readFileSync(stateFile(), "utf8")) as Team;
+  } catch {
+    return;
+  }
+  if (!isTeam(disk) || (disk.id && team.id && disk.id !== team.id)) return;
+  for (const [botId, msgs] of Object.entries(disk.dms ?? {})) {
+    team.dms ||= {};
+    team.dms[botId] = mergeMessages(team.dms[botId] ?? [], msgs);
+  }
+  for (const dch of disk.channels ?? []) {
+    const ch = team.channels?.find((c) => c.id === dch.id);
+    if (ch) ch.messages = mergeMessages(ch.messages ?? [], dch.messages);
+  }
+  const roster = (t: Team) => (t.members?.length ? t.members : t.bots) ?? [];
+  for (const dbot of roster(disk)) {
+    const bot = roster(team).find((b) => b.id === dbot.id);
+    if (!bot || !dbot.grok_sessions) continue;
+    for (const [k, v] of Object.entries(dbot.grok_sessions)) {
+      const cur = bot.grok_sessions ?? {};
+      if (v && !(cur as Record<string, string | undefined>)[k]) {
+        bot.grok_sessions = { ...cur, [k]: v };
+      }
+    }
+  }
+}
+
 export function saveTeam(team: Team): void {
-  syncAliases(team);
-  team.updated_at = now();
-  writeAtomic(stateFile(), JSON.stringify(team, null, 2) + "\n");
+  withStateLock(() => {
+    mergeFromDisk(team);
+    syncAliases(team);
+    team.updated_at = now();
+    writeAtomic(stateFile(), JSON.stringify(team, null, 2) + "\n");
+  });
 }
 
 export function saveState(team: Team): void {

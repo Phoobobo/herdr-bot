@@ -82,6 +82,8 @@ function usePiBodies(): void {
 const WORK_SLUGS = ["lead", "eng", "research", "qa"];
 
 beforeEach(() => {
+  process.env.HERDR_BOT_CWD = HERDR_CWD;
+  delete process.env.HERDR_BOT_GROK_TRUST;
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-bot-spawn-"));
   process.env.HERDR_BOT_STATE_DIR = dir;
   process.env.HERDR_BOT_BODIES = "pi,omp,claude,codex,grok";
@@ -245,6 +247,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  delete process.env.HERDR_BOT_CWD;
   setHerdrRunner(null);
   delete process.env.HERDR_BOT_STATE_DIR;
   delete process.env.HERDR_BOT_BODIES;
@@ -931,4 +934,19 @@ test("two quick TUI DMs to one bot are serialized and never cross replies", asyn
   // Both user lines are stored first (composer echo), then each reply in send order.
   expect(dm.filter((m) => m.from_bot_id === "user").map((m) => m.text)).toEqual(["message one", "message two"]);
   expect(dm.filter((m) => m.from_bot_id === "eng").map((m) => m.text)).toEqual([MULTILINE_REPLY, CODE_BLOCK_REPLY]);
+});
+
+test("HERDR_BOT_GROK_TRUST=1 adds grok's --trust (opt-in; off by default)", async () => {
+  await openBot("lead");
+  expect(starts().some((c) => c.includes("--trust"))).toBe(false);
+  agents.length = 0;
+  calls.length = 0;
+  process.env.HERDR_BOT_GROK_TRUST = "1";
+  try {
+    await openBot("lead");
+  } finally {
+    delete process.env.HERDR_BOT_GROK_TRUST;
+  }
+  const im = starts().find((c) => c[2] === "lead-im")!;
+  expect(im.slice(im.indexOf("--") + 3, im.indexOf("--") + 4)).toEqual(["--trust"]);
 });
