@@ -21,6 +21,7 @@ import {
   LONG_CHINESE_REPLY,
   MULTILINE_REPLY,
   agentChunk,
+  chunked,
   thoughtChunk,
   toolCall,
   toolCallDone,
@@ -130,7 +131,7 @@ test("only the last turn is returned; thoughts are dropped", () => {
   expect(turn.text).not.toContain("Planning");
 });
 
-test("text around a tool call becomes separate paragraphs; hostTurn user chunks don't reset the turn", () => {
+test("tool call in the middle: only the final segment is stored; hostTurn user chunks don't reset the turn", () => {
   const host = JSON.stringify({
     timestamp: 1,
     method: "session/update",
@@ -149,7 +150,10 @@ test("text around a tool call becomes separate paragraphs; hostTurn user chunks 
     agentChunk(SID, "`add`."),
     turnCompleted(SID),
   ].join("\n");
-  expect(grokTurnFromUpdates(jsonl).text).toBe("Let me look.\n\nIt exports `add`.");
+  const turn = grokTurnFromUpdates(jsonl);
+  expect(turn.text).toBe("It exports `add`.");
+  expect(turn.text).not.toContain("Let me look.");
+  expect(turn.toolCalls).toBe(1);
 });
 
 test("torn / garbage lines are skipped like grok's own reader", () => {
@@ -161,7 +165,7 @@ test("torn / garbage lines are skipped like grok's own reader", () => {
 
 test("incomplete turn reports completed=false", () => {
   const jsonl = [userChunk(SID, "p"), agentChunk(SID, "partial")].join("\n");
-  expect(grokTurnFromUpdates(jsonl)).toEqual({ text: "partial", completed: false, stopReason: null, error: null });
+  expect(grokTurnFromUpdates(jsonl)).toEqual({ text: "partial", completed: false, stopReason: null, error: null, toolCalls: 0 });
 });
 
 test("error stop surfaces agent_result as an error", () => {
@@ -196,4 +200,60 @@ test("waitForGrokReply throws on an error stop", async () => {
 test("thought-only turn is not a reply", async () => {
   append([userChunk(SID, "p"), thoughtChunk(SID, "hmm"), turnCompleted(SID)]);
   await expect(waitForGrokReply(SID, 0, { cwd: CWD, graceMs: 50, pollMs: 10 })).rejects.toThrow(/no reply text/);
+});
+
+test("multiple tool calls: only the text after the LAST one is stored", () => {
+  const jsonl = [
+    userChunk(SID, "fix it"),
+    agentChunk(SID, "Reading."),
+    toolCall(SID, "t1", "Read a.ts"),
+    toolCallDone(SID, "t1"),
+    agentChunk(SID, "Now editing."),
+    toolCall(SID, "t2", "Edit a.ts"),
+    agentChunk(SID, "still working"),
+    toolCallDone(SID, "t2"),
+    ...chunked(CODE_BLOCK_REPLY).map((c) => agentChunk(SID, c)),
+    turnCompleted(SID),
+  ].join("\n");
+  const turn = grokTurnFromUpdates(jsonl);
+  expect(turn.text).toBe(CODE_BLOCK_REPLY);
+  expect(turn.toolCalls).toBe(2);
+  for (const early of ["Reading.", "Now editing.", "still working"]) expect(turn.text).not.toContain(early);
+});
+
+test("a turn ending on a tool call with no text after it raises GROK_TURN", async () => {
+  const home = process.env.GROK_HOME!;
+  const sid = "019a0b7c-1111-7222-8333-444444444444";
+  const dir = path.join(home, "sessions", encodeCwdForGrok("/tmp/x"), sid);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, "updates.jsonl"),
+    [userChunk(sid, "go"), agentChunk(sid, "Let me check."), toolCall(sid, "t1", "Run"), toolCallDone(sid, "t1"), turnCompleted(sid)].join("\n") + "\n",
+  );
+  expect(grokTurnFromUpdates(fs.readFileSync(path.join(dir, "updates.jsonl"), "utf8")).text).toBe("");
+  await expect(waitForGrokReply(sid, 0, { graceMs: 50, pollMs: 10 })).rejects.toThrow(
+    /GROK_TURN|tool call with no final reply text/,
+  );
+  try {
+    await waitForGrokReply(sid, 0, { graceMs: 50, pollMs: 10 });
+  } catch (err: any) {
+    expect(err.code).toBe("GROK_TURN");
+    expect(err.message).toContain("tool call with no final reply text");
+  }
+});
+
+test("two quick prompts in one session: each read binds to its own turn, never mixed", () => {
+  const jsonl = [
+    ...turnLines(SID, "first\nmsg", MULTILINE_REPLY, 0),
+    ...turnLines(SID, "second msg", LONG_CHINESE_REPLY, 1),
+  ].join("\n");
+  expect(grokTurnFromUpdates(jsonl, { prompt: "first\r\nmsg" }).text).toBe(MULTILINE_REPLY);
+  expect(grokTurnFromUpdates(jsonl, { prompt: "second msg" }).text).toBe(LONG_CHINESE_REPLY);
+  // Second turn not written yet → its read is pending, not the first turn's text.
+  const onlyFirst = turnLines(SID, "first\nmsg", MULTILINE_REPLY, 0).join("\n");
+  expect(grokTurnFromUpdates(onlyFirst + "\n" + userChunk(SID, "second msg"), { prompt: "second msg" })).toMatchObject({
+    text: "",
+    completed: false,
+  });
+  expect(grokTurnFromUpdates(onlyFirst, { prompt: "second msg" }).completed).toBe(false);
 });

@@ -7,6 +7,8 @@
 // log (~/.grok/sessions/<cwd>/<id>/updates.jsonl, see grok.ts), never from the
 // screen. The pi body keeps the screen-read fallback.
 
+import fs from "node:fs";
+import path from "node:path";
 import * as store from "./store.ts";
 import { PLUGIN_ID, runHerdr } from "./herdr.ts";
 import {
@@ -824,7 +826,57 @@ function grokSessionIdFor(bot: Bot, slug: string, agents: any[]): string | null 
   return isUuid(pinned) ? pinned : null;
 }
 
-async function promptSessionAndWait(
+// One prompt→reply at a time per session slug. A second message sent before
+// the first reply finishes waits its turn, so two turns' text never mix (grok
+// would otherwise get the second paste mid-turn). In-process chain for the TUI,
+// plus a lock dir under the state dir for separate `herdr-bots dm` processes.
+const slugChains = new Map<string, Promise<unknown>>();
+const LOCK_STALE_MS = 10 * 60_000;
+
+async function withSlugLock<T>(slug: string, fn: () => Promise<T>): Promise<T> {
+  const prev = slugChains.get(slug) ?? Promise.resolve();
+  const run = prev.catch(() => {}).then(() => withFileLock(slug, fn));
+  slugChains.set(slug, run);
+  try {
+    return await run;
+  } finally {
+    if (slugChains.get(slug) === run) slugChains.delete(slug);
+  }
+}
+
+async function withFileLock<T>(slug: string, fn: () => Promise<T>): Promise<T> {
+  const dir = path.join(store.stateDir(), "locks");
+  fs.mkdirSync(dir, { recursive: true });
+  const lock = path.join(dir, `${slug.replace(/[^A-Za-z0-9._-]/g, "_")}.lock`);
+  for (;;) {
+    try {
+      fs.mkdirSync(lock);
+      break;
+    } catch (err: any) {
+      if (err?.code !== "EEXIST") throw err;
+      try {
+        if (Date.now() - fs.statSync(lock).mtimeMs > LOCK_STALE_MS) {
+          fs.rmSync(lock, { recursive: true, force: true });
+          continue;
+        }
+      } catch {
+        continue;
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    fs.rmSync(lock, { recursive: true, force: true });
+  }
+}
+
+function promptSessionAndWait(bot: Bot, slug: string, text: string, agents?: any[]): Promise<string | null> {
+  return withSlugLock(slug, () => promptSessionAndWaitUnlocked(bot, slug, text, agents));
+}
+
+async function promptSessionAndWaitUnlocked(
   bot: Bot,
   slug: string,
   text: string,
@@ -853,7 +905,8 @@ async function promptSessionAndWait(
   ]);
   if (grok && sessionId) {
     // Structured write-back: the turn's agent_message_chunk text, verbatim.
-    return waitForGrokReply(sessionId, offset, { cwd: CWD });
+    // Bound to this prompt's own turn (user text match), not "whatever came last".
+    return waitForGrokReply(sessionId, offset, { cwd: CWD, prompt: text });
   }
   const fromWait = replyTextFromPromptResult(result);
   if (fromWait) return fromWait;
@@ -911,10 +964,15 @@ export async function deliverChannelPost(
 }
 
 export async function deliverDmPost(botIdOrName: string, text: string): Promise<Bot> {
-  const bot = await openBot(botIdOrName);
-  const reply = await promptSessionAndWait(bot, imAgentSlug(bot), formatDmPrompt(text));
-  if (reply) store.postToDm(bot.id, bot.id, reply);
-  return bot;
+  const target = store.findBot(store.resumeDefaultTeam(), botIdOrName);
+  // Lock covers open + prompt + read so a second quick DM can neither race the
+  // pane start (two minted sessions) nor land mid-turn.
+  return withSlugLock(imAgentSlug(target), async () => {
+    const bot = await openBot(target.id);
+    const reply = await promptSessionAndWaitUnlocked(bot, imAgentSlug(bot), formatDmPrompt(text));
+    if (reply) store.postToDm(bot.id, bot.id, reply);
+    return bot;
+  });
 }
 
 export async function sendComposer(

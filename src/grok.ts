@@ -220,6 +220,8 @@ export interface GrokTurn {
   completed: boolean;
   stopReason: string | null;
   error: string | null;
+  /** tool_call count in the turn; when > 0, `text` is only the segment after the last one. */
+  toolCalls: number;
 }
 
 function chunkText(update: Record<string, any>): string | null {
@@ -234,37 +236,62 @@ function isRealUserChunk(update: Record<string, any>): boolean {
   return !(meta && typeof meta === "object" && (meta.hostTurn === true || meta.interjection === true));
 }
 
-/**
- * Reply of the LAST user turn in an updates.jsonl slice: concatenation of
- * agent_message_chunk text after the last user_message_chunk run, until
- * turn_completed. Text separated by tool calls becomes separate paragraphs.
- * If the slice has no user chunk, the whole slice is the turn.
- */
-export function grokTurnFromUpdates(jsonl: string): GrokTurn {
-  const updates = parseGrokUpdates(jsonl);
-  let start = 0;
-  for (let i = updates.length - 1; i >= 0; i--) {
-    if (isRealUserChunk(updates[i].update)) {
-      start = i + 1;
-      break;
+function normPrompt(s: string): string {
+  return s.replace(/\r\n?/g, "\n").trim();
+}
+
+interface RawTurn {
+  user: string;
+  events: Array<Record<string, any>>;
+}
+
+/** Split an updates.jsonl slice into turns: a run of real user chunks, then everything until the next run. */
+function splitTurns(jsonl: string): RawTurn[] {
+  const turns: RawTurn[] = [];
+  let cur: RawTurn | null = null;
+  let inUser = false;
+  for (const { update } of parseGrokUpdates(jsonl)) {
+    if (isRealUserChunk(update)) {
+      if (!cur || !inUser) {
+        cur = { user: "", events: [] };
+        turns.push(cur);
+      }
+      inUser = true;
+      cur.user += chunkText(update) ?? "";
+      continue;
     }
+    inUser = false;
+    if (!cur) {
+      // Slice started mid-turn (no user chunk): treat the head as its own turn.
+      cur = { user: "", events: [] };
+      turns.push(cur);
+    }
+    cur.events.push(update);
   }
-  const segments: string[] = [];
-  let current: string | null = null;
+  return turns;
+}
+
+function foldTurn(events: Array<Record<string, any>>): GrokTurn {
+  // QA acceptance: the stored reply is the final user-facing message. When a
+  // turn has tool calls, only agent_message_chunk text after the LAST tool
+  // call/update counts; earlier narration ("Let me look…") is dropped and never
+  // stored. A turn ending on a tool call has no reply text.
+  let current = "";
+  let toolCalls = 0;
   let completed = false;
   let stopReason: string | null = null;
   let error: string | null = null;
-  for (let i = start; i < updates.length; i++) {
-    const u = updates[i].update;
+  for (const u of events) {
     const kind = u.sessionUpdate;
     if (kind === "agent_message_chunk") {
       const t = chunkText(u);
-      if (t != null) current = (current ?? "") + t;
+      if (t != null) current += t;
       continue;
     }
     if (kind === "tool_call" || kind === "tool_call_update") {
-      if (current != null) segments.push(current);
-      current = null;
+      if (kind === "tool_call") toolCalls++;
+      else if (toolCalls === 0) toolCalls = 1;
+      current = "";
       continue;
     }
     if (kind === "turn_completed") {
@@ -282,9 +309,29 @@ export function grokTurnFromUpdates(jsonl: string): GrokTurn {
     }
     // agent_thought_chunk, plan, usage, retry, … are not part of the reply.
   }
-  if (current != null) segments.push(current);
-  const text = segments.filter((s) => s.trim().length > 0).join("\n\n");
-  return { text, completed, stopReason, error };
+  return { text: current.trim() ? current : "", completed, stopReason, error, toolCalls };
+}
+
+/**
+ * Reply of one turn in an updates.jsonl slice.
+ * - With `prompt`: the FIRST turn whose user text is that prompt (so two
+ *   quick sends to one session each read their own turn). Not found yet →
+ *   completed=false.
+ * - Without: the last turn in the slice.
+ * Text is agent_message_chunk only (verbatim); with tool calls, only the text
+ * after the last tool call.
+ */
+export function grokTurnFromUpdates(jsonl: string, opts: { prompt?: string } = {}): GrokTurn {
+  const turns = splitTurns(jsonl);
+  let turn: RawTurn | undefined;
+  if (opts.prompt != null) {
+    const want = normPrompt(opts.prompt);
+    turn = turns.find((t) => normPrompt(t.user) === want) ?? turns.find((t) => t.user && normPrompt(t.user).includes(want));
+    if (!turn) return { text: "", completed: false, stopReason: null, error: null, toolCalls: 0 };
+  } else {
+    turn = turns.at(-1);
+  }
+  return foldTurn(turn?.events ?? []);
 }
 
 /** Read updates.jsonl bytes appended since `offset` (whole file if it shrank). */
@@ -313,17 +360,23 @@ function sleep(ms: number): Promise<void> {
 export async function waitForGrokReply(
   sessionId: string,
   offset: number,
-  opts: { cwd?: string; graceMs?: number; pollMs?: number } = {},
+  opts: { cwd?: string; graceMs?: number; pollMs?: number; prompt?: string } = {},
 ): Promise<string> {
   const envGrace = Number(process.env.HERDR_BOT_GROK_REPLY_GRACE_MS);
   const graceMs = opts.graceMs ?? (Number.isFinite(envGrace) && envGrace >= 0 ? envGrace : 20_000);
   const pollMs = opts.pollMs ?? 150;
   const deadline = Date.now() + graceMs;
   for (;;) {
-    const turn = grokTurnFromUpdates(readGrokUpdatesSince(sessionId, offset, opts.cwd));
+    const turn = grokTurnFromUpdates(readGrokUpdatesSince(sessionId, offset, opts.cwd), { prompt: opts.prompt });
     if (turn.completed) {
       if (turn.error) {
         throw new BotError("GROK_TURN", `grok turn ended with ${turn.stopReason ?? "error"}: ${turn.error}`);
+      }
+      if (!turn.text.trim() && turn.toolCalls > 0) {
+        throw new BotError(
+          "GROK_TURN",
+          `grok turn ended (${turn.stopReason ?? "unknown"}) on a tool call with no final reply text after it`,
+        );
       }
       if (!turn.text.trim()) {
         throw new BotError("GROK_TURN", `grok turn ended (${turn.stopReason ?? "unknown"}) with no reply text`);

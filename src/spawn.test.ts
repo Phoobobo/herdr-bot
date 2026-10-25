@@ -37,7 +37,18 @@ import {
   setModel,
 } from "./store.ts";
 import { encodeCwdForGrok, setGrokModelsRunner } from "./grok.ts";
-import { CODE_BLOCK_REPLY, LONG_CHINESE_REPLY, MULTILINE_REPLY, turnLines } from "./grok.fixtures.ts";
+import {
+  CODE_BLOCK_REPLY,
+  LONG_CHINESE_REPLY,
+  MULTILINE_REPLY,
+  agentChunk,
+  chunked,
+  toolCall,
+  toolCallDone,
+  turnCompleted,
+  turnLines,
+  userChunk,
+} from "./grok.fixtures.ts";
 
 let dir: string;
 let calls: string[][];
@@ -55,6 +66,7 @@ let grokSessions: Map<string, string>;
 let grokReply: ((slug: string, prompt: string) => string) | null;
 let grokWritesReply: boolean;
 let grokPromptCount: Map<string, number>;
+let grokCustomWrite: ((file: string, sid: string, prompt: string, n: number) => void) | null;
 const HERDR_CWD = "/Users/phoobobo/Workspace/herdr-bot";
 
 function grokUpdatesFile(sid: string): string {
@@ -88,6 +100,7 @@ beforeEach(() => {
   grokReply = null;
   grokWritesReply = true;
   grokPromptCount = new Map();
+  grokCustomWrite = null;
   process.env.GROK_HOME = path.join(dir, "grok-home");
   process.env.HERDR_BOT_GROK_MODELS = "grok-4.7,grok-4.6";
   process.env.HERDR_BOT_GROK_REPLY_GRACE_MS = "300";
@@ -190,7 +203,11 @@ beforeEach(() => {
         const sid = grokSessions.get(target)!;
         const n = grokPromptCount.get(target) ?? 0;
         grokPromptCount.set(target, n + 1);
-        if (grokWritesReply) {
+        if (grokCustomWrite) {
+          const file = grokUpdatesFile(sid);
+          fs.mkdirSync(path.dirname(file), { recursive: true });
+          grokCustomWrite(file, sid, args[3], n);
+        } else if (grokWritesReply) {
           const file = grokUpdatesFile(sid);
           fs.mkdirSync(path.dirname(file), { recursive: true });
           const reply = grokReply ? grokReply(target, args[3]) : `reply from ${target}`;
@@ -865,4 +882,53 @@ test("herdr agent_session (grok hook) wins over the pinned id", async () => {
   await sendComposer({ kind: "bot", index: 0 }, "hi");
   expect(getDm("lead").at(-1)!.text).toBe("from the live session");
   expect(fs.existsSync(grokUpdatesFile(other))).toBe(true);
+});
+
+test("TUI composer DM with a tool call stores only the final segment in dms.<id>", async () => {
+  resumeDefaultTeam();
+  grokCustomWrite = (file, sid, prompt, n) => {
+    fs.appendFileSync(
+      file,
+      [
+        userChunk(sid, prompt, n),
+        agentChunk(sid, "Let me check the repo first."),
+        toolCall(sid, "t1", "Read README.md"),
+        toolCallDone(sid, "t1"),
+        agentChunk(sid, "The README says:\n"),
+        agentChunk(sid, LONG_CHINESE_REPLY),
+        turnCompleted(sid),
+      ].map((l) => `${l}\n`).join(""),
+    );
+  };
+  await sendComposer({ kind: "bot", index: 2 }, "读一下 README");
+  const dm = loadOrSeedDefaultTeam().dms!.research;
+  expect(dm.map((m) => m.from_bot_id)).toEqual(["user", "research"]);
+  expect(dm[1].text).toBe(`The README says:\n${LONG_CHINESE_REPLY}`);
+  expect(JSON.stringify(loadOrSeedDefaultTeam())).not.toContain("Let me check the repo first.");
+});
+
+test("two quick TUI DMs to one bot are serialized and never cross replies", async () => {
+  resumeDefaultTeam();
+  let busy = false;
+  let overlap = false;
+  grokCustomWrite = (file, sid, prompt, n) => {
+    if (busy) overlap = true;
+    busy = true;
+    fs.appendFileSync(file, `${userChunk(sid, prompt, n)}\n`);
+    // Grok finishes the turn later (after herdr's --wait already returned).
+    setTimeout(() => {
+      const reply = prompt.includes("one") ? MULTILINE_REPLY : CODE_BLOCK_REPLY;
+      fs.appendFileSync(file, [...chunked(reply).map((c) => agentChunk(sid, c)), turnCompleted(sid)].map((l) => `${l}\n`).join(""));
+      busy = false;
+    }, 120);
+  };
+  await Promise.all([
+    sendComposer({ kind: "bot", index: 1 }, "message one"),
+    sendComposer({ kind: "bot", index: 1 }, "message two"),
+  ]);
+  expect(overlap).toBe(false);
+  const dm = getDm("eng");
+  // Both user lines are stored first (composer echo), then each reply in send order.
+  expect(dm.filter((m) => m.from_bot_id === "user").map((m) => m.text)).toEqual(["message one", "message two"]);
+  expect(dm.filter((m) => m.from_bot_id === "eng").map((m) => m.text)).toEqual([MULTILINE_REPLY, CODE_BLOCK_REPLY]);
 });
