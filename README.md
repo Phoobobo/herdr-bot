@@ -8,16 +8,17 @@ When you invoke plugin action **`phoobobo.herdr-bot.bots`** (a keybind, or `herd
 
 | name | tag | body | description |
 | ---- | --- | ---- | ----------- |
-| 幕僚长 | lead | pi | 管理你的其他 Bot，需要决策时找你 |
-| 研发工程师 | eng | pi | You are an awesome software engineer. |
-| 研究员 | research | pi | The user works with GitHub every day — start with those tools when suggesting connectors or taking on work. |
-| 测试工程师 | qa | pi | You are an awesome Quality Assurance Engineer. |
+| 幕僚长 | lead | grok | 管理你的其他 Bot，需要决策时找你 |
+| 研发工程师 | eng | grok | You are an awesome software engineer. |
+| 研究员 | research | grok | The user works with GitHub every day — start with those tools when suggesting connectors or taking on work. |
+| 测试工程师 | qa | grok | You are an awesome Quality Assurance Engineer. |
 
 Those four names are the product gate: resume must return exactly them — extra or missing fails.
 
 ## Requirements
 
 - herdr ≥ 0.8.2 with a running server (the default session)
+- [Grok Build](https://x.ai) (`grok` CLI) installed and logged in (`grok login`), with herdr's grok integration installed (`herdr integration install grok`) — the default bot body. `pi` stays available as an optional body.
 - [bun](https://bun.sh) on the PATH herdr was started with
 - macOS or Linux
 
@@ -103,14 +104,41 @@ herdr-bots team show --json
 
 ## Bot body (harness)
 
-`body` is the installed Herdr integration that runs the bot. Options come from `herdr integration status`; **`not installed` is skipped**. Default body is **`pi`**.
-
-On a machine with the usual integrations that includes at least: `pi`, `omp`, `claude`, `codex`, `copilot`, `opencode`, `hermes`, `grok`.
+`body` is the installed Herdr integration that runs the bot: `grok` (default) or `pi` (optional). Options come from `herdr integration status`; **`not installed` is skipped**. Other integrations (`omp`, `claude`, `codex`, …) still start, but only `grok` and `pi` have a reply write-back path.
 
 ```bash
 herdr-bots bodies list --json
-herdr-bots bots body 研发工程师 --body claude
+herdr-bots bots body 研发工程师 --body pi      # opt one bot back into pi
+herdr-bots bots model 研发工程师 --model grok-4.7
 ```
+
+### grok (default)
+
+Setup, once per machine:
+
+```bash
+grok login                         # interactive; herdr-bot never logs in for you
+herdr integration install grok     # herdr reports grok session ids + restores with --resume
+grok models                        # the bot's model must be listed here
+```
+
+- **Model** is per bot (`model`, default **`grok-4.7`**; `bots model <bot> --model <id>`, `bots create … --model <id>`, plugin action `set-model`). Before starting an agent herdr-bot runs `grok models` and fails with `GROK_MODEL` if the id is not listed (a logged-out grok only lists its defaults).
+- **Sessions are pinned.** Each pane (`work`, `instant-msg`, `channel`) gets its own grok session UUID stored on the bot (`grok_sessions.work|im|ch`). The first start runs `grok --session-id <uuid> --model <m> --rules <identity>`; once grok has written the session directory, restarts use `grok --resume <uuid> …` so history survives. The identity goes in `--rules` (appended `<human_rules>`), so grok's own system prompt and tools stay intact.
+- **Write-back reads grok's structured session log, never the screen.** Grok persists every ACP `session/update` to `$GROK_HOME/sessions/<url-encoded cwd>/<session-id>/updates.jsonl`. herdr-bot records the file's byte offset, sends the prompt with `herdr agent prompt … --wait`, then reads the new lines until `turn_completed`: the reply is the concatenated `agent_message_chunk` text of that turn (thoughts and tool calls dropped; text split by a tool call becomes separate paragraphs). Multi-line text, code fences and long Chinese are stored byte-for-byte. A turn that ends in `error`/`rate_limit`, has no text, or never completes (for example blocked on a tool approval) raises `GROK_TURN` instead of storing a guess. herdr's `agent_session` (from the grok hook) wins over the pinned id when present.
+- Screen sync (`channel sync`, `extractReplyFor`) skips grok bots.
+
+| env | default | purpose |
+| --- | ------- | ------- |
+| `GROK_BIN_PATH` | `grok` | grok binary used for `grok models` |
+| `GROK_HOME` | `~/.grok` | where grok keeps `sessions/` (same variable grok reads) |
+| `HERDR_BOT_GROK_MODELS` | — | comma list that replaces `grok models` (tests / offline) |
+| `HERDR_BOT_GROK_REPLY_GRACE_MS` | `20000` | how long to wait for `turn_completed` after `agent prompt --wait` returns |
+
+Existing state from older versions keeps `body: pi` until you switch it: `herdr-bots bots body <bot> --body grok`, then stop the old pi agents and `herdr-bots bots up`.
+
+### pi (optional)
+
+`pi` bots start with `--system-prompt <identity>`; replies come from the wait JSON, or from `herdr agent read` of the same pane (see Live harnesses).
 
 ## Overlay TUI
 
@@ -122,11 +150,13 @@ The overlay is the Grok Bot layout: a dark sidebar of bots then channels, a main
 herdr-bots [--json] [--no-open]              # resume default team, open overlay
 herdr-bots team show [--json]
 herdr-bots bots list [--json]
-herdr-bots bots create --name <name> [--tag t] [--description d] [--body pi]
+herdr-bots bots create --name <name> [--tag t] [--description d] [--body grok|pi] [--model grok-4.7]
 herdr-bots bots rename <id|name> --name <name>
 herdr-bots bots tag <id|name> --tag <tag>
 herdr-bots bots description <id|name> --description <text>
 herdr-bots bots body <id|name> --body <harness>
+herdr-bots bots model <id|name> --model <grok-model-id>
+herdr-bots dm <id|name> --text <text> [--json]   # 1:1 DM; prints the stored reply
 herdr-bots channel list [--json]
 herdr-bots channel create --name <name>
 herdr-bots channel post <channel> --from <bot> --text <text>
@@ -135,7 +165,7 @@ herdr-bots bodies list [--json]
 
 `--json` is the QA surface. `herdr-bots bots list --json` must return exactly the four default names on a fresh state dir.
 
-Plugin actions: `bots`, `create-bot`, `rename-bot`, `set-tag`, `set-description`, `set-body`, `create-channel`.
+Plugin actions: `bots`, `create-bot`, `rename-bot`, `set-tag`, `set-description`, `set-body`, `set-model`, `create-channel`.
 
 Manifest id: **`phoobobo.herdr-bot`**.
 
@@ -157,7 +187,7 @@ The `herdr-bots` workspace keeps **tab 1** for the bots TUI (`bots`). From tab 2
 
 | pane | agent | role |
 | ---- | ----- | ---- |
-| `work` | `lead` / `eng` / `research` / `qa` | original work pi (TUI never prompts it) |
+| `work` | `lead` / `eng` / `research` / `qa` | original work agent (TUI never prompts it) |
 | `instant-msg` | `{id}-im` | private 1:1 with the user |
 | `channel` | `{id}-ch` | this bot's mouth in the **shared** `#standup` room |
 
@@ -167,7 +197,7 @@ herdr-bots bots live --json        # QA: names must be the four, each live
 herdr-bots bots open 研发工程师 --json
 ```
 
-TUI send uses `herdr agent prompt <target> <text> --wait --timeout 120000` (IM → that bot's `{id}-im`; `#standup` → every member's `{id}-ch`) and writes the reply into the overlay store. `--until` is omitted so herdr's default accepts idle, done, or blocked. If the wait JSON has no message body (herdr 0.8.2), the same session slug is `agent read` and the full assistant reply after the prompt is stored (thinking and Pi footer dropped; wrap fragments joined). There is still **one** `#standup` `messages[]`. The TUI path never prompts work slugs or uses `extractReplyFor`.
+TUI send uses `herdr agent prompt <target> <text> --wait --timeout 120000` (IM → that bot's `{id}-im`; `#standup` → every member's `{id}-ch`) and writes the reply into the overlay store. `--until` is omitted so herdr's default accepts idle, done, or blocked. **grok** bodies take the reply from that pane's grok session log (`updates.jsonl`, see Bot body). For **pi** bodies, if the wait JSON has no message body (herdr 0.8.2), the same session slug is `agent read` and the full assistant reply after the prompt is stored (thinking and Pi footer dropped; wrap fragments joined). There is still **one** `#standup` `messages[]`. The TUI path never prompts work slugs or uses `extractReplyFor`.
 
 ```bash
 herdr-bots channel create --name standup --json

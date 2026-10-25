@@ -59,6 +59,7 @@ export async function dispatch(id: string, args: string[]): Promise<void> {
         tag: flag(args, "tag") || pos[1],
         description: flag(args, "description") || flag(args, "desc") || pos[2],
         body: resolveBody(flag(args, "body") || pos[3]),
+        model: flag(args, "model"),
       });
       return;
     }
@@ -92,6 +93,14 @@ export async function dispatch(id: string, args: string[]): Promise<void> {
       const body = flag(args, "body") || pos[1];
       if (!name || !body) throw new BotError("BAD_REQUEST", "set-body requires --name and --body");
       store.setBody(name, resolveBody(body));
+      return;
+    }
+    case "set-model":
+    case "model": {
+      const name = flag(args, "name") || pos[0];
+      const model = flag(args, "model") || pos[1];
+      if (!name || !model) throw new BotError("BAD_REQUEST", "set-model requires --name and --model");
+      store.setModel(name, model);
       return;
     }
     case "create-channel": {

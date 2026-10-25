@@ -9,6 +9,7 @@ import { resolveBody } from "./integrations.ts";
 import {
   BotError,
   DEFAULT_BODY,
+  DEFAULT_MODEL,
   DEFAULT_SEED_BOTS,
   DEFAULT_SESSION,
   DEFAULT_TEAM_ID,
@@ -177,7 +178,7 @@ export function findChannel(team: Team, idOrName: string): Channel {
   return ch;
 }
 
-export type BotInput = { name: string; tag?: string; description?: string; body?: string; id?: string };
+export type BotInput = { name: string; tag?: string; description?: string; body?: string; id?: string; model?: string };
 
 export function createBot(input: BotInput): Bot;
 export function createBot(team: Team, input: BotInput): Bot;
@@ -196,6 +197,7 @@ export function createBot(teamOrInput: Team | BotInput, input?: BotInput): Bot {
     tag: (spec.tag ?? "bot").trim() || "bot",
     description: spec.description ?? "",
     body: resolveBody(spec.body),
+    ...(spec.model?.trim() ? { model: spec.model.trim() } : {}),
     created_at: t,
     updated_at: t,
   };
@@ -267,6 +269,32 @@ export function setBody(teamOrName: Team | string, nameOrBody: string, body?: st
 }
 
 export const setBotBody = setBody;
+
+/** Effective grok model for a bot. */
+export function botModel(bot: Pick<Bot, "model">): string {
+  return bot.model?.trim() || DEFAULT_MODEL;
+}
+
+/**
+ * Set the per-bot grok model. Validated against `grok models` when the agent
+ * starts (needs a logged-in grok), not here.
+ */
+export function setModel(name: string, model: string): Bot;
+export function setModel(team: Team, name: string, model: string): Bot;
+export function setModel(teamOrName: Team | string, nameOrModel: string, model?: string): Bot {
+  const team = typeof teamOrName === "string" ? loadState() : syncAliases(teamOrName);
+  const id = typeof teamOrName === "string" ? teamOrName : nameOrModel;
+  const value = (typeof teamOrName === "string" ? nameOrModel : model ?? "").trim();
+  if (!value) throw new BotError("BAD_REQUEST", "model is required");
+  if (/\s/.test(value)) throw new BotError("BAD_REQUEST", `invalid model id: ${value}`);
+  const bot = findBot(team, id);
+  bot.model = value;
+  bot.updated_at = now();
+  saveTeam(team);
+  return bot;
+}
+
+export const setBotModel = setModel;
 
 export function createChannel(name: string): Channel;
 export function createChannel(input: { name: string; description?: string }): Channel;

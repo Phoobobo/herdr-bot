@@ -70,7 +70,7 @@ function paintDetails(scr: Screen, dx: number, dw: number, h: number): void {
     y += 2;
     scr.text(dx, y, truncate(`tag  ${bot.tag}`, dw), SGR.app, dw);
     y++;
-    scr.text(dx, y, truncate(`body ${bot.body}`, dw), SGR.app, dw);
+    scr.text(dx, y, truncate(`body ${bot.body}${(bot.body || "grok") === "grok" ? ` · model ${store.botModel(bot)}` : ""}`, dw), SGR.app, dw);
     y += 2;
     const desc = bot.description || "";
     for (const line of desc.split("\n")) {

@@ -5,6 +5,7 @@ import path from "node:path";
 import { DEFAULT_MEMBER_NAMES, DEFAULT_SEED_BOTS } from "./types.ts";
 import { USER_DISPLAY_NAME, USER_ID } from "./types.ts";
 import {
+  botModel,
   createBot,
   createChannel,
   getDm,
@@ -17,6 +18,7 @@ import {
   setBotBody,
   setBotDescription,
   setBotTag,
+  setModel,
 } from "./store.ts";
 
 let dir: string;
@@ -55,7 +57,7 @@ test("seed is idempotent: second resume does not add extra members", () => {
   expect(roster(second)).toHaveLength(4);
 });
 
-test("default bots have seeded tag, description, and body pi", () => {
+test("default bots have seeded tag, description, and body grok", () => {
   const team = resumeDefaultTeam();
   const list = (team.members?.length ? team.members : team.bots) ?? [];
   for (const seed of DEFAULT_SEED_BOTS) {
@@ -63,7 +65,7 @@ test("default bots have seeded tag, description, and body pi", () => {
     expect(bot).toBeDefined();
     expect(bot!.tag).toBe(seed.tag);
     expect(bot!.description).toBe(seed.description);
-    expect(bot!.body).toBe("pi");
+    expect(bot!.body).toBe("grok");
   }
   expect(team.session).toBe("default");
   expect(team.default).toBe(true);
@@ -96,16 +98,29 @@ test("create / rename / tag / description / body / channel round-trip", () => {
   expect(memberNames(reloaded).slice(0, 4)).toEqual([...DEFAULT_MEMBER_NAMES]);
 });
 
-test("set body to omp must persist as omp, not fall back to pi", () => {
+test("set body to omp must persist as omp, not fall back to the default", () => {
   const team = resumeDefaultTeam();
   const eng = team.members.find((b) => b.name === "研发工程师")!;
-  expect(eng.body).toBe("pi");
+  expect(eng.body).toBe("grok");
   const updated = setBotBody(eng.id, "omp");
   expect(updated.body).toBe("omp");
   const reloaded = loadOrSeedDefaultTeam();
   const found = reloaded.members.find((b) => b.id === eng.id)!;
   expect(found.body).toBe("omp");
-  expect(found.body).not.toBe("pi");
+  expect(found.body).not.toBe("grok");
+});
+
+test("pi stays an optional body; grok model is per bot with default grok-4.7", () => {
+  resumeDefaultTeam();
+  expect(setBotBody("qa", "pi").body).toBe("pi");
+  expect(loadOrSeedDefaultTeam().members.find((b) => b.id === "qa")!.body).toBe("pi");
+  const lead = loadOrSeedDefaultTeam().members.find((b) => b.id === "lead")!;
+  expect(botModel(lead)).toBe("grok-4.7");
+  expect(setModel("lead", " grok-4.6 ").model).toBe("grok-4.6");
+  expect(botModel(loadOrSeedDefaultTeam().members.find((b) => b.id === "lead")!)).toBe("grok-4.6");
+  expect(() => setModel("lead", "")).toThrow(/model is required/);
+  expect(() => setModel("lead", "grok 4")).toThrow(/invalid model id/);
+  expect(createBot({ name: "模型测试", model: "grok-4.5" }).model).toBe("grok-4.5");
 });
 
 test("postToDm user→bot persists across reload", () => {
