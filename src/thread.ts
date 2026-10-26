@@ -111,6 +111,8 @@ export async function syncChannelReplies(channel: string): Promise<{ channel: Ch
 
   for (const bot of team.members) {
     if (!bot.pane_id && !/^[a-z]/.test(bot.id)) continue;
+    // grok bodies write back from grok's session log (spawn.ts); never scrape their screens.
+    if ((bot.body || "grok") === "grok") continue;
     let paneText = "";
     try {
       paneText = await reader(agentSlug(bot));
@@ -125,7 +127,7 @@ export async function syncChannelReplies(channel: string): Promise<{ channel: Ch
       const reply = extractReplyFor(paneText, ch.name, authorName, outbound.text);
       if (!reply) continue;
       if (alreadyHas(ch, bot.id, reply)) continue;
-      const message = store.postToChannel(ch.id, bot.id, reply);
+      const message = store.postToChannel(ch.id, bot.id, reply, { reply_to: outbound.id });
       added.push({ from: bot.name, text: reply, message });
     }
   }
@@ -146,6 +148,8 @@ export async function syncDmReplies(botIdOrName: string): Promise<{ added: Synce
   const team = store.resumeDefaultTeam();
   const bot = store.findBot(team, botIdOrName);
   const added: SyncedReply[] = [];
+  // grok bodies write back from grok's session log (spawn.ts); never scrape their screens.
+  if ((bot.body || "grok") === "grok") return { added };
   let paneText = "";
   try {
     paneText = await reader(agentSlug(bot));
@@ -160,7 +164,7 @@ export async function syncDmReplies(botIdOrName: string): Promise<{ added: Synce
     if (!reply) continue;
     const current = store.getDm(bot.id);
     if (current.some((m) => m.from_bot_id === bot.id && m.text === reply)) continue;
-    const message = store.postToDm(bot.id, bot.id, reply);
+    const message = store.postToDm(bot.id, bot.id, reply, { reply_to: outbound.id });
     added.push({ from: bot.name, text: reply, message });
   }
   return { added };

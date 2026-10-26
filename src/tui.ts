@@ -4,7 +4,7 @@ import * as store from "./store.ts";
 import { sendComposer } from "./spawn.ts";
 import type { Bot, Channel, Team } from "./types.ts";
 import { DEFAULT_BODY } from "./types.ts";
-import { chatView } from "./view.ts";
+import { chatView, clampScroll, threadLayout, visibleRows } from "./view.ts";
 import { InputParser, SGR, Screen, strWidth, truncate, type InputEvent } from "./ui.ts";
 
 type Sel =
@@ -23,8 +23,11 @@ let details = false;
 let status = "";
 let running = true;
 let listW = 22;
+/** Thread scroll: rows hidden below the viewport (0 = pinned to newest). */
+let scroll = 0;
+let lastThread = { total: 0, height: 1 };
 
-const HINT = "n bot  c channel  i details  q quit";
+const HINT = "n bot  c channel  i details  pgup/dn scroll  q quit";
 
 function reload(): void {
   team = store.loadOrSeedDefaultTeam();
@@ -70,7 +73,7 @@ function paintDetails(scr: Screen, dx: number, dw: number, h: number): void {
     y += 2;
     scr.text(dx, y, truncate(`tag  ${bot.tag}`, dw), SGR.app, dw);
     y++;
-    scr.text(dx, y, truncate(`body ${bot.body}`, dw), SGR.app, dw);
+    scr.text(dx, y, truncate(`body ${bot.body}${(bot.body || "grok") === "grok" ? ` · model ${store.botModel(bot)}` : ""}`, dw), SGR.app, dw);
     y += 2;
     const desc = bot.description || "";
     for (const line of desc.split("\n")) {
@@ -135,13 +138,22 @@ function paint(): void {
     paintDetails(scr, dx, dw, h);
   } else {
     scr.text(dx, 0, truncate(view.header, dw), SGR.header, dw);
-    let ty = 2;
+    // Full messages: newlines kept, long lines wrapped; the viewport scrolls.
     const cap = Math.max(1, h - 3);
-    const msgs = view.thread.length > cap ? view.thread.slice(-cap) : view.thread;
-    for (const line of msgs) {
+    const rows = threadLayout(view.entries, dw);
+    scroll = clampScroll(scroll, rows.length, cap);
+    lastThread = { total: rows.length, height: cap };
+    let ty = 2;
+    for (const row of visibleRows(rows, cap, scroll)) {
       if (ty >= h - 1) break;
-      scr.text(dx, ty, truncate(line, dw), SGR.app, dw);
+      scr.text(dx, ty, row.text, row.label ? SGR.dim : SGR.app, dw);
       ty++;
+    }
+    if (scroll > 0) {
+      const more = `↓ ${scroll} more`;
+      const mw = strWidth(more);
+      const hw = strWidth(truncate(view.header, dw));
+      if (hw + mw + 2 <= dw) scr.text(dx + dw - mw, 0, more, SGR.dim, mw);
     }
   }
 
@@ -230,12 +242,14 @@ function move(delta: number): void {
   const next = (cur + delta + items.length) % items.length;
   sel = items[next];
   details = false;
+  scroll = 0;
   syncSelected();
 }
 
 function selectRow(next: Sel): void {
   sel = next;
   details = false;
+  scroll = 0;
   syncSelected();
 }
 
@@ -243,6 +257,7 @@ function sendDraft(): void {
   const text = draft;
   if (!text.trim()) return;
   draft = "";
+  scroll = 0;
   status = "sending...";
   void sendComposer(sel, text)
     .then(() => {
@@ -256,7 +271,15 @@ function sendDraft(): void {
     });
 }
 
+function scrollBy(delta: number): void {
+  scroll = clampScroll(scroll + delta, lastThread.total, lastThread.height);
+}
+
 function handleMouse(ev: Extract<InputEvent, { type: "mouse" }>): void {
+  if (ev.kind === "wheel-up" || ev.kind === "wheel-down") {
+    if (ev.x >= listW && !details) scrollBy(ev.kind === "wheel-up" ? 3 : -3);
+    return;
+  }
   if (ev.kind !== "press" || ev.button !== 0) return;
   if (ev.x < listW) {
     const hit = sidebarRows().find((r) => r.y === ev.y);
@@ -293,6 +316,11 @@ function handleNormal(ev: InputEvent): void {
   }
   if (ev.type === "key" && ev.name === "down") move(1);
   if (ev.type === "key" && ev.name === "up") move(-1);
+  if (ev.type === "key" && (ev.name === "pgup" || ev.name === "pgdn")) {
+    const page = Math.max(1, lastThread.height - 1);
+    scrollBy(ev.name === "pgup" ? page : -page);
+    return;
+  }
   if (ev.type === "key" && ev.name === "enter") {
     sendDraft();
     return;

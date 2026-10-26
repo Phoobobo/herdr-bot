@@ -5,6 +5,7 @@ import path from "node:path";
 import { DEFAULT_MEMBER_NAMES, DEFAULT_SEED_BOTS } from "./types.ts";
 import { USER_DISPLAY_NAME, USER_ID } from "./types.ts";
 import {
+  botModel,
   createBot,
   createChannel,
   getDm,
@@ -17,6 +18,8 @@ import {
   setBotBody,
   setBotDescription,
   setBotTag,
+  setModel,
+  saveTeam,
 } from "./store.ts";
 
 let dir: string;
@@ -55,7 +58,7 @@ test("seed is idempotent: second resume does not add extra members", () => {
   expect(roster(second)).toHaveLength(4);
 });
 
-test("default bots have seeded tag, description, and body pi", () => {
+test("default bots have seeded tag, description, and body grok", () => {
   const team = resumeDefaultTeam();
   const list = (team.members?.length ? team.members : team.bots) ?? [];
   for (const seed of DEFAULT_SEED_BOTS) {
@@ -63,7 +66,7 @@ test("default bots have seeded tag, description, and body pi", () => {
     expect(bot).toBeDefined();
     expect(bot!.tag).toBe(seed.tag);
     expect(bot!.description).toBe(seed.description);
-    expect(bot!.body).toBe("pi");
+    expect(bot!.body).toBe("grok");
   }
   expect(team.session).toBe("default");
   expect(team.default).toBe(true);
@@ -96,16 +99,29 @@ test("create / rename / tag / description / body / channel round-trip", () => {
   expect(memberNames(reloaded).slice(0, 4)).toEqual([...DEFAULT_MEMBER_NAMES]);
 });
 
-test("set body to omp must persist as omp, not fall back to pi", () => {
+test("set body to omp must persist as omp, not fall back to the default", () => {
   const team = resumeDefaultTeam();
   const eng = team.members.find((b) => b.name === "研发工程师")!;
-  expect(eng.body).toBe("pi");
+  expect(eng.body).toBe("grok");
   const updated = setBotBody(eng.id, "omp");
   expect(updated.body).toBe("omp");
   const reloaded = loadOrSeedDefaultTeam();
   const found = reloaded.members.find((b) => b.id === eng.id)!;
   expect(found.body).toBe("omp");
-  expect(found.body).not.toBe("pi");
+  expect(found.body).not.toBe("grok");
+});
+
+test("pi stays an optional body; grok model is per bot with default grok-4.7", () => {
+  resumeDefaultTeam();
+  expect(setBotBody("qa", "pi").body).toBe("pi");
+  expect(loadOrSeedDefaultTeam().members.find((b) => b.id === "qa")!.body).toBe("pi");
+  const lead = loadOrSeedDefaultTeam().members.find((b) => b.id === "lead")!;
+  expect(botModel(lead)).toBe("grok-4.7");
+  expect(setModel("lead", " grok-4.6 ").model).toBe("grok-4.6");
+  expect(botModel(loadOrSeedDefaultTeam().members.find((b) => b.id === "lead")!)).toBe("grok-4.6");
+  expect(() => setModel("lead", "")).toThrow(/model is required/);
+  expect(() => setModel("lead", "grok 4")).toThrow(/invalid model id/);
+  expect(createBot({ name: "模型测试", model: "grok-4.5" }).model).toBe("grok-4.5");
 });
 
 test("postToDm user→bot persists across reload", () => {
@@ -141,4 +157,71 @@ test("postToChannel from lead still works", () => {
   const reloaded = loadOrSeedDefaultTeam();
   expect(reloaded.channels[0].messages[0].from_bot_id).toBe("lead");
   expect(reloaded.channels[0].messages[0].text).toBe("hello team");
+});
+
+test("saving a stale team snapshot keeps DMs and grok sessions written meanwhile", () => {
+  const stale = resumeDefaultTeam();
+  const fresh = resumeDefaultTeam();
+  fresh.members[1].grok_sessions = { im: "01a173e3-470b-73ab-80e8-e39f64ace877" };
+  saveTeam(fresh);
+  postToDm("eng", USER_ID, "first");
+  postToDm("eng", "eng", "reply one");
+  stale.workspace_id = "w9";
+  saveTeam(stale);
+  const after = resumeDefaultTeam();
+  expect(after.workspace_id).toBe("w9");
+  expect(getDm("eng").map((m) => m.text)).toEqual(["first", "reply one"]);
+  expect(after.members[1].grok_sessions?.im).toBe("01a173e3-470b-73ab-80e8-e39f64ace877");
+  expect(fs.readdirSync(dir).some((f) => f.endsWith(".lock"))).toBe(false);
+});
+
+test("concurrent processes posting DMs never lose a message", async () => {
+  resumeDefaultTeam();
+  const script = path.join(dir, "post.ts");
+  const storePath = path.resolve(import.meta.dir, "store.ts");
+  fs.writeFileSync(
+    script,
+    `import { postToDm } from ${JSON.stringify(storePath)};\n` +
+      `const [bot, n] = process.argv.slice(2);\n` +
+      `for (let i = 0; i < Number(n); i++) postToDm(bot, "user", bot + "-" + i);\n`,
+  );
+  const bots = ["lead", "eng", "research", "qa"];
+  const procs = bots.map((b) =>
+    Bun.spawn(["bun", "run", script, b, "15"], {
+      env: { ...process.env, HERDR_BOT_STATE_DIR: dir },
+      stdout: "ignore",
+      stderr: "inherit",
+    }),
+  );
+  expect(await Promise.all(procs.map((p) => p.exited))).toEqual([0, 0, 0, 0]);
+  for (const b of bots) {
+    expect(getDm(b).map((m) => m.text)).toEqual(Array.from({ length: 15 }, (_, i) => `${b}-${i}`));
+  }
+}, 30000);
+
+test("reply_to: set on replies when given, omitted otherwise, and old records without it still load", () => {
+  resumeDefaultTeam();
+  createChannel({ name: "standup" });
+  const q = postToDm("lead", "user", "question");
+  const a = postToDm("lead", "lead", "answer", { reply_to: q.id });
+  expect(q.reply_to).toBeUndefined();
+  expect("reply_to" in q).toBe(false);
+  expect(a.reply_to).toBe(q.id);
+  const team = loadOrSeedDefaultTeam();
+  const t = postToDm(team, "lead", "lead", "team-form answer", { reply_to: q.id });
+  expect(t.reply_to).toBe(q.id);
+  expect(getDm("lead").map((m) => m.reply_to ?? null)).toEqual([null, q.id, q.id]);
+
+  const post = postToChannel("standup", "user", "hi");
+  const r = postToChannel("standup", "eng", "hey", { reply_to: post.id });
+  expect(r.reply_to).toBe(post.id);
+  expect(loadOrSeedDefaultTeam().channels[0].messages.map((m) => m.reply_to ?? null)).toEqual([null, post.id]);
+
+  // Backward compat: a record written before reply_to existed.
+  const legacy = loadOrSeedDefaultTeam();
+  legacy.dms!.lead.push({ id: "msg_old", from_bot_id: "lead", text: "old reply", created_at: 1 });
+  saveTeam(legacy);
+  const old = getDm("lead").find((m) => m.id === "msg_old")!;
+  expect(old.text).toBe("old reply");
+  expect(old.reply_to).toBeUndefined();
 });

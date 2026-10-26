@@ -3,7 +3,12 @@
 export const PLUGIN_ID = "phoobobo.herdr-bot";
 export const DEFAULT_TEAM_ID = "default";
 export const DEFAULT_SESSION = "default";
-export const DEFAULT_BODY = "pi";
+/** Default harness. `pi` stays available as an optional body (`body: pi`). */
+export const DEFAULT_BODY = "grok";
+/** Default Grok Build model; per-bot override in Bot.model. */
+export const DEFAULT_MODEL = "grok-4.7";
+
+export type SessionKind = "work" | "im" | "ch";
 
 export const DEFAULT_MEMBER_NAMES = ["幕僚长", "研发工程师", "研究员", "测试工程师"] as const;
 
@@ -25,6 +30,14 @@ export interface Bot {
   ch_pane_id?: string | null;
   im_agent?: string | null;
   ch_agent?: string | null;
+  /** Grok model id for body=grok (null/absent = DEFAULT_MODEL). */
+  model?: string | null;
+  /**
+   * Pinned grok session UUIDs per pane. Started with `grok --session-id`,
+   * restarted with `grok --resume`; write-back reads
+   * ~/.grok/sessions/<cwd>/<id>/updates.jsonl.
+   */
+  grok_sessions?: Partial<Record<SessionKind, string>> | null;
   created_at: number;
   updated_at: number;
 }
@@ -34,6 +47,16 @@ export interface ChannelMessage {
   from_bot_id: string;
   text: string;
   created_at: number;
+  /**
+   * Id of the message this one answers (bot replies only). Optional: records
+   * written before reply_to existed have no link and render as plain messages.
+   */
+  reply_to?: string | null;
+}
+
+export interface PostOptions {
+  /** Id of the message being answered. */
+  reply_to?: string | null;
 }
 
 export interface Channel {

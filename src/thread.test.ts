@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createChannel, getDm, postToChannel, postToDm, resumeDefaultTeam } from "./store.ts";
+import { createChannel, getDm, postToChannel, postToDm, resumeDefaultTeam, setBody } from "./store.ts";
 import { extractReplyFor, setPaneReader, syncChannelReplies, syncDmReplies, threadLines } from "./thread.ts";
 
 const ENG = `
@@ -44,9 +44,11 @@ let dir: string;
 beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-bot-thread-"));
   process.env.HERDR_BOT_STATE_DIR = dir;
-  process.env.HERDR_BOT_BODIES = "pi,omp";
+  process.env.HERDR_BOT_BODIES = "pi,omp,grok";
   const panes: Record<string, string> = { lead: "", eng: ENG, research: RESEARCH, qa: QA };
   setPaneReader(async (slug) => panes[slug] ?? "");
+  // Screen sync is the pi-body path; grok bodies are skipped (see last test).
+  for (const b of resumeDefaultTeam().members) setBody(b.id, "pi");
 });
 
 afterEach(() => {
@@ -133,4 +135,14 @@ test("shared-stream gate: one standup channel holds every member reply in order"
     "研究员: c",
     "测试工程师: d",
   ]);
+});
+
+test("grok bodies are never screen-synced (write-back comes from grok's session log)", async () => {
+  for (const b of resumeDefaultTeam().members) setBody(b.id, "grok");
+  createChannel({ name: "standup" });
+  postToChannel("standup", "lead", "herdr-bot ping: reply in this pane.");
+  const { added } = await syncChannelReplies("standup");
+  expect(added).toEqual([]);
+  postToDm("eng", "user", "ping");
+  expect((await syncDmReplies("eng")).added).toEqual([]);
 });

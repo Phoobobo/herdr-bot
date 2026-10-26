@@ -2,10 +2,10 @@
 
 import { openDefaultOverlay } from "./actions.ts";
 import * as store from "./store.ts";
-import { deliverChannelPost, ensureTeamLive, listLiveBots, openBot } from "./spawn.ts";
+import { deliverChannelPost, deliverDmPost, ensureTeamLive, listLiveBots, openBot } from "./spawn.ts";
 import { syncChannelReplies, threadLines } from "./thread.ts";
 import { listInstalledBodiesSync, resolveBody } from "./integrations.ts";
-import { BotError, type Team } from "./types.ts";
+import { BotError, USER_ID, type Team } from "./types.ts";
 
 function usage(): string {
   return `herdr-bots — one team, one Herdr session
@@ -16,15 +16,17 @@ Usage:
   herdr-bots bots list --json
   herdr-bots resume [--no-open] [--json]
   herdr-bots team show --json
-  herdr-bots bots create --name <name> [--tag t] [--description d] [--body pi]
+  herdr-bots bots create --name <name> [--tag t] [--description d] [--body grok|pi] [--model grok-4.7]
   herdr-bots bots rename <id|name> --name <name>
   herdr-bots bots tag <id|name> --tag <tag>
   herdr-bots bots description <id|name> --description <text>
-  herdr-bots bots body <id|name> --body <harness>
+  herdr-bots bots body <id|name> --body <harness>      (grok default; pi optional)
+  herdr-bots bots model <id|name> --model <grok model> (checked against \`grok models\` at start)
   herdr-bots bots open <id|name> [--json]
   herdr-bots bots up [--json]
   herdr-bots bots live --json
-  herdr-bots bot create|rename|tag|description|body|open   (alias of bots *)
+  herdr-bots bot create|rename|tag|description|body|model|open   (alias of bots *)
+  herdr-bots dm <id|name> --text <text> [--json]       (1:1 DM, same path as the TUI composer)
   herdr-bots channel create --name <name>
   herdr-bots channel post <channel> --from <bot> --text <text>
   herdr-bots channel sync <channel> [--json]
@@ -163,6 +165,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
           tag: flag(argv, "tag"),
           description: flag(argv, "description") || flag(argv, "desc"),
           body: resolveBody(flag(argv, "body")),
+          model: flag(argv, "model"),
         });
         writeJson({ ok: true, bot });
         return 0;
@@ -199,6 +202,14 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         writeJson({ ok: true, bot });
         return 0;
       }
+      if (sub === "model") {
+        const target = pos[0];
+        const model = flag(argv, "model") || pos[1];
+        if (!target || !model) throw new BotError("BAD_REQUEST", "usage: herdr-bots bots model <id|name> --model <id>");
+        const bot = store.setModel(target, model);
+        writeJson({ ok: true, bot });
+        return 0;
+      }
       if (sub === "open") {
         const target = pos[0] || flag(argv, "name");
         if (!target) throw new BotError("BAD_REQUEST", "usage: herdr-bots bots open <id|name>");
@@ -222,7 +233,23 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         });
         return 0;
       }
-      throw new BotError("BAD_REQUEST", "usage: herdr-bots bots list|create|rename|tag|description|body|open|up|live");
+      throw new BotError("BAD_REQUEST", "usage: herdr-bots bots list|create|rename|tag|description|body|model|open|up|live");
+    }
+
+    if (cmd === "dm") {
+      const pos = positionals(argv.slice(1));
+      const target = pos[0] || flag(argv, "to");
+      const text = flag(argv, "text");
+      if (!target || !text?.trim()) throw new BotError("BAD_REQUEST", "usage: herdr-bots dm <id|name> --text <text>");
+      const team = store.resumeDefaultTeam();
+      const bot = store.findBot(team, target);
+      const message = store.postToDm(bot.id, USER_ID, text);
+      await deliverDmPost(bot.id, text, message.id);
+      const thread = store.resumeDefaultTeam().dms?.[bot.id] ?? [];
+      // Match by reply_to so a concurrent DM's reply is never reported as ours.
+      const reply = thread.find((m) => m.from_bot_id === bot.id && m.reply_to === message.id) ?? null;
+      writeJson({ ok: true, bot: bot.id, message, reply });
+      return 0;
     }
 
     if (cmd === "channel") {
@@ -248,7 +275,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
           throw new BotError("BAD_REQUEST", "usage: herdr-bots channel post <channel> --from <bot> --text <text>");
         }
         const message = store.postToChannel(channel, from, text);
-        const delivery = await deliverChannelPost(channel, from, text);
+        const delivery = await deliverChannelPost(channel, from, text, message.id);
         writeJson({ ok: true, message, delivery });
         return 0;
       }

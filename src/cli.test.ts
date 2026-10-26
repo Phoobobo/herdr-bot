@@ -118,3 +118,25 @@ test("CLI set body to omp stays omp after reload", () => {
   const eng = listed.bots.find((b: { name: string }) => b.name === "研发工程师");
   expect(eng.body).toBe("omp");
 });
+
+test("CLI bots model sets a per-bot grok model; create accepts --model", () => {
+  const set = json(cli("bots", "model", "lead", "--model", "grok-4.6"));
+  expect(set.ok).toBe(true);
+  expect(set.bot.model).toBe("grok-4.6");
+  const shown = json(cli("team", "show", "--json"));
+  const lead = shown.team.bots.find((b: { id: string }) => b.id === "lead");
+  expect(lead.model).toBe("grok-4.6");
+  expect(lead.body).toBe("grok");
+  const created = json(cli("bots", "create", "--name", "模型", "--model", "grok-4.5"));
+  expect(created.bot.model).toBe("grok-4.5");
+  expect(created.bot.body).toBe("grok");
+  const bad = cli("bots", "model", "lead");
+  expect(bad.exitCode).toBe(1);
+  expect(json(bad).error.code).toBe("BAD_REQUEST");
+});
+
+test("CLI dm requires a bot and --text", () => {
+  const bad = cli("dm", "lead");
+  expect(bad.exitCode).toBe(1);
+  expect(json(bad).error.message).toContain("herdr-bots dm <id|name> --text <text>");
+});

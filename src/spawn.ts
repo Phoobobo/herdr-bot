@@ -1,9 +1,24 @@
 // Open a bot = start its body as a live harness in the default Herdr session.
 // Workspace tab1 is the bots TUI (`bots` / `herdr-bots`). From tab 2, one
-// named tab per bot with panes: work, instant-msg, channel — each its own pi.
+// named tab per bot with panes: work, instant-msg, channel — each its own
+// harness session (body grok by default; pi optional).
+//
+// Write-back: for body=grok, replies are read from grok's structured session
+// log (~/.grok/sessions/<cwd>/<id>/updates.jsonl, see grok.ts), never from the
+// screen. The pi body keeps the screen-read fallback.
 
+import fs from "node:fs";
+import path from "node:path";
 import * as store from "./store.ts";
 import { PLUGIN_ID, runHerdr } from "./herdr.ts";
+import {
+  assertGrokModel,
+  findGrokSessionDir,
+  grokUpdatesOffset,
+  isUuid,
+  newGrokSessionId,
+  waitForGrokReply,
+} from "./grok.ts";
 import {
   BotError,
   DEFAULT_MEMBER_NAMES,
@@ -12,6 +27,7 @@ import {
   USER_ID,
   type Bot,
   type ChannelMessage,
+  type SessionKind,
   type Team,
 } from "./types.ts";
 
@@ -20,7 +36,15 @@ export type HerdrRunner = (args: string[]) => Promise<RunResult>;
 
 const WORKSPACE_LABEL = "herdr-bots";
 const BOTS_TAB_LABEL = "bots";
-const CWD = "/Users/phoobobo/Workspace/herdr-bot";
+const LEGACY_CWD = "/Users/phoobobo/Workspace/herdr-bot";
+/**
+ * Working dir for bot panes and the bots TUI: HERDR_BOT_CWD, else the original
+ * Mac checkout when it exists, else this checkout (e.g. a Linux box).
+ */
+function botCwd(): string {
+  if (process.env.HERDR_BOT_CWD) return process.env.HERDR_BOT_CWD;
+  return fs.existsSync(LEGACY_CWD) ? LEGACY_CWD : path.resolve(import.meta.dir, "..");
+}
 const PANE_WORK = "work";
 const PANE_IM = "instant-msg";
 const PANE_CH = "channel";
@@ -58,7 +82,10 @@ function sessionSlug(id: string, suffix: "im" | "ch"): string {
   return name;
 }
 
-/** Identity injected into pi via `--system-prompt` on `herdr agent start`. */
+/**
+ * Identity injected on `herdr agent start`: pi gets `--system-prompt`, grok
+ * gets `--rules` (appended to grok's own system prompt as <human_rules>).
+ */
 export function identitySystemPrompt(bot: Pick<Bot, "name" | "tag" | "description">): string {
   return [
     `Your name is ${bot.name}. Description: ${bot.description}`,
@@ -421,7 +448,7 @@ async function ensureWorkspace(team: Team): Promise<string> {
     "workspace",
     "create",
     "--cwd",
-    CWD,
+    botCwd(),
     "--label",
     WORKSPACE_LABEL,
     "--no-focus",
@@ -493,7 +520,7 @@ async function ensureBotTab(bot: Bot, workspaceId: string): Promise<{ tabId: str
     "--workspace",
     workspaceId,
     "--cwd",
-    CWD,
+    botCwd(),
     "--label",
     bot.name,
     "--no-focus",
@@ -514,12 +541,49 @@ async function splitPane(paneId: string, direction: "right" | "down"): Promise<s
   return id;
 }
 
+function sessionKindOf(session: "work" | "im" | "channel"): SessionKind {
+  return session === "channel" ? "ch" : session;
+}
+
+/**
+ * Harness args after `--` for `herdr agent start`.
+ * - pi: `--system-prompt <identity>` (unchanged).
+ * - grok: pinned session per pane. `--session-id <uuid>` creates it (grok
+ *   rejects an existing id there), `--resume <uuid>` once grok has written its
+ *   session dir. Then `--model <id>` and `--rules <identity>`.
+ * Mutates bot.grok_sessions when a new id is minted; caller persists the team.
+ */
+export function harnessArgs(bot: Bot, session: "work" | "im" | "channel"): string[] {
+  const prompt = sessionSystemPrompt(bot, session);
+  const kind = bot.body || "grok";
+  if (kind !== "grok") return ["--system-prompt", prompt];
+  const sk = sessionKindOf(session);
+  const sessions = { ...(bot.grok_sessions ?? {}) };
+  let id = sessions[sk];
+  if (!isUuid(id)) {
+    id = newGrokSessionId();
+    sessions[sk] = id;
+    bot.grok_sessions = sessions;
+  }
+  const sessionArgs = findGrokSessionDir(id, botCwd()) ? ["--resume", id] : ["--session-id", id];
+  // Grok asks "Do you trust the contents of this directory?" on first launch
+  // in an untrusted folder, and herdr reports that screen as idle, so a prompt
+  // would be typed into the dialog. Opt in with HERDR_BOT_GROK_TRUST=1 to pass
+  // grok's `--trust` (persists the grant), or trust the folder once by hand.
+  const trust = process.env.HERDR_BOT_GROK_TRUST === "1" ? ["--trust"] : [];
+  return [...sessionArgs, ...trust, "--model", store.botModel(bot), "--rules", prompt];
+}
+
 async function startAgent(
   bot: Bot,
   paneId: string,
   spec: { slug: string; paneLabel: string; session: "work" | "im" | "channel" },
+  team?: Team,
 ): Promise<void> {
-  const kind = bot.body || "pi";
+  const kind = bot.body || "grok";
+  if (kind === "grok") assertGrokModel(store.botModel(bot));
+  const args = harnessArgs(bot, spec.session);
+  if (team) store.saveTeam(team);
   const startArgs = [
     "agent",
     "start",
@@ -531,8 +595,7 @@ async function startAgent(
     "--timeout",
     "30000",
     "--",
-    "--system-prompt",
-    sessionSystemPrompt(bot, spec.session),
+    ...args,
   ];
   // Fresh split panes can still be settling (not a shell yet). herdr then
   // returns agent_pane_busy. Retry the same start; do not kill other workspaces.
@@ -594,7 +657,7 @@ export async function openBotsTui(): Promise<void> {
     running = false;
   }
   if (!running) {
-    const run = await runner(["pane", "run", paneId, "bun", "run", `${CWD}/src/tui.ts`]);
+    const run = await runner(["pane", "run", paneId, "bun", "run", `${botCwd()}/src/tui.ts`]);
     if (run.exitCode !== 0) {
       const overlay = await runner([
         "plugin",
@@ -639,7 +702,7 @@ async function ensureBotLive(bot: Bot, team: Team): Promise<void> {
   const workNamed = findAgent(agents, workSlug);
   let workPane = workNamed?.pane_id ?? inTab().find((p) => p.label === PANE_WORK)?.pane_id ?? rootPaneId;
   if (!workNamed) {
-    await startAgent(bot, workPane, { slug: workSlug, paneLabel: PANE_WORK, session: "work" });
+    await startAgent(bot, workPane, { slug: workSlug, paneLabel: PANE_WORK, session: "work" }, team);
   } else {
     await runner(["pane", "rename", workPane, PANE_WORK]).catch(() => ({
       stdout: "",
@@ -654,7 +717,7 @@ async function ensureBotLive(bot: Bot, team: Team): Promise<void> {
   let imPane = imNamed?.pane_id ?? inTab().find((p) => p.label === PANE_IM)?.pane_id;
   if (!imPane) imPane = await splitPane(workPane, "right");
   if (!imNamed) {
-    await startAgent(bot, imPane, { slug: imSlug, paneLabel: PANE_IM, session: "im" });
+    await startAgent(bot, imPane, { slug: imSlug, paneLabel: PANE_IM, session: "im" }, team);
   } else {
     await runner(["pane", "rename", imPane, PANE_IM]).catch(() => ({
       stdout: "",
@@ -669,7 +732,7 @@ async function ensureBotLive(bot: Bot, team: Team): Promise<void> {
   let chPane = chNamed?.pane_id ?? inTab().find((p) => p.label === PANE_CH)?.pane_id;
   if (!chPane) chPane = await splitPane(workPane, "down");
   if (!chNamed) {
-    await startAgent(bot, chPane, { slug: chSlug, paneLabel: PANE_CH, session: "channel" });
+    await startAgent(bot, chPane, { slug: chSlug, paneLabel: PANE_CH, session: "channel" }, team);
   } else {
     await runner(["pane", "rename", chPane, PANE_CH]).catch(() => ({
       stdout: "",
@@ -760,7 +823,88 @@ export function formatSharedChannelPrompt(
   ].join("\n");
 }
 
-async function promptSessionAndWait(slug: string, text: string): Promise<string | null> {
+function sessionKindOfSlug(slug: string): SessionKind {
+  if (slug.endsWith("-im")) return "im";
+  if (slug.endsWith("-ch")) return "ch";
+  return "work";
+}
+
+/** The grok session a live agent is on: herdr's agent_session, else the pinned id. */
+function grokSessionIdFor(bot: Bot, slug: string, agents: any[]): string | null {
+  const live = findAgent(agents, slug)?.agent_session;
+  if (live && typeof live === "object" && typeof live.value === "string" && isUuid(live.value)) {
+    return live.value;
+  }
+  const pinned = bot.grok_sessions?.[sessionKindOfSlug(slug)];
+  return isUuid(pinned) ? pinned : null;
+}
+
+// One prompt→reply at a time per session slug. A second message sent before
+// the first reply finishes waits its turn, so two turns' text never mix (grok
+// would otherwise get the second paste mid-turn). In-process chain for the TUI,
+// plus a lock dir under the state dir for separate `herdr-bots dm` processes.
+const slugChains = new Map<string, Promise<unknown>>();
+const LOCK_STALE_MS = 10 * 60_000;
+
+async function withSlugLock<T>(slug: string, fn: () => Promise<T>): Promise<T> {
+  const prev = slugChains.get(slug) ?? Promise.resolve();
+  const run = prev.catch(() => {}).then(() => withFileLock(slug, fn));
+  slugChains.set(slug, run);
+  try {
+    return await run;
+  } finally {
+    if (slugChains.get(slug) === run) slugChains.delete(slug);
+  }
+}
+
+async function withFileLock<T>(slug: string, fn: () => Promise<T>): Promise<T> {
+  const dir = path.join(store.stateDir(), "locks");
+  fs.mkdirSync(dir, { recursive: true });
+  const lock = path.join(dir, `${slug.replace(/[^A-Za-z0-9._-]/g, "_")}.lock`);
+  for (;;) {
+    try {
+      fs.mkdirSync(lock);
+      break;
+    } catch (err: any) {
+      if (err?.code !== "EEXIST") throw err;
+      try {
+        if (Date.now() - fs.statSync(lock).mtimeMs > LOCK_STALE_MS) {
+          fs.rmSync(lock, { recursive: true, force: true });
+          continue;
+        }
+      } catch {
+        continue;
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    fs.rmSync(lock, { recursive: true, force: true });
+  }
+}
+
+function promptSessionAndWait(bot: Bot, slug: string, text: string, agents?: any[]): Promise<string | null> {
+  return withSlugLock(slug, () => promptSessionAndWaitUnlocked(bot, slug, text, agents));
+}
+
+async function promptSessionAndWaitUnlocked(
+  bot: Bot,
+  slug: string,
+  text: string,
+  agents?: any[],
+): Promise<string | null> {
+  const grok = (bot.body || "grok") === "grok";
+  let sessionId: string | null = null;
+  let offset = 0;
+  if (grok) {
+    sessionId = grokSessionIdFor(bot, slug, agents ?? (await agentList()));
+    if (!sessionId) {
+      throw new BotError("GROK_SESSION", `no grok session id for ${slug}; restart it with \`herdr-bots bots open ${bot.id}\``);
+    }
+    offset = grokUpdatesOffset(sessionId, botCwd());
+  }
   // Omit --until so herdr's default matches idle, done, or blocked.
   // A single --until idle misses live pi sessions that settle at done.
   const result = await herdrJson([
@@ -772,6 +916,11 @@ async function promptSessionAndWait(slug: string, text: string): Promise<string 
     "--timeout",
     PROMPT_TIMEOUT_MS,
   ]);
+  if (grok && sessionId) {
+    // Structured write-back: the turn's agent_message_chunk text, verbatim.
+    // Bound to this prompt's own turn (user text match), not "whatever came last".
+    return waitForGrokReply(sessionId, offset, { cwd: botCwd(), prompt: text });
+  }
   const fromWait = replyTextFromPromptResult(result);
   if (fromWait) return fromWait;
   if (!isSessionSlug(slug)) return null;
@@ -783,6 +932,8 @@ export async function deliverChannelPost(
   channel: string,
   fromIdOrName: string,
   text: string,
+  /** Id of the stored post being delivered; each bot reply links back to it. */
+  replyTo?: string | null,
 ): Promise<{ delivered: LiveMember[]; skipped: Array<LiveMember & { reason?: string }> }> {
   const team = store.resumeDefaultTeam();
   const ch = store.findChannel(team, channel);
@@ -817,8 +968,8 @@ export async function deliverChannelPost(
         (m) => `${senderDisplay(liveTeam, m.from_bot_id)}: ${m.text}`,
       );
       const prompt = formatSharedChannelPrompt(liveCh.name, from.name, text, thread);
-      const reply = await promptSessionAndWait(slug, prompt);
-      if (reply) store.postToChannel(ch.id, bot.id, reply);
+      const reply = await promptSessionAndWait(bot, slug, prompt, agents);
+      if (reply) store.postToChannel(ch.id, bot.id, reply, { reply_to: replyTo ?? null });
       delivered.push(row);
     } catch (err) {
       skipped.push({ ...row, reason: err instanceof Error ? err.message : String(err) });
@@ -827,11 +978,21 @@ export async function deliverChannelPost(
   return { delivered, skipped };
 }
 
-export async function deliverDmPost(botIdOrName: string, text: string): Promise<Bot> {
-  const bot = await openBot(botIdOrName);
-  const reply = await promptSessionAndWait(imAgentSlug(bot), formatDmPrompt(text));
-  if (reply) store.postToDm(bot.id, bot.id, reply);
-  return bot;
+export async function deliverDmPost(
+  botIdOrName: string,
+  text: string,
+  /** Id of the stored user DM being answered; set as the reply's reply_to. */
+  replyTo?: string | null,
+): Promise<Bot> {
+  const target = store.findBot(store.resumeDefaultTeam(), botIdOrName);
+  // Lock covers open + prompt + read so a second quick DM can neither race the
+  // pane start (two minted sessions) nor land mid-turn.
+  return withSlugLock(imAgentSlug(target), async () => {
+    const bot = await openBot(target.id);
+    const reply = await promptSessionAndWaitUnlocked(bot, imAgentSlug(bot), formatDmPrompt(text));
+    if (reply) store.postToDm(bot.id, bot.id, reply, { reply_to: replyTo ?? null });
+    return bot;
+  });
 }
 
 export async function sendComposer(
@@ -845,13 +1006,13 @@ export async function sendComposer(
     const bot = team.members[sel.index];
     if (!bot) throw new BotError("BOT_NOT_FOUND", "no bot selected");
     const msg = store.postToDm(bot.id, USER_ID, trimmed);
-    await deliverDmPost(bot.id, trimmed);
+    await deliverDmPost(bot.id, trimmed, msg.id);
     return msg;
   }
   const ch = team.channels[sel.index];
   if (!ch) throw new BotError("CHANNEL_NOT_FOUND", "no channel selected");
   const msg = store.postToChannel(ch.id, USER_ID, trimmed);
-  await deliverChannelPost(ch.id, USER_ID, trimmed);
+  await deliverChannelPost(ch.id, USER_ID, trimmed, msg.id);
   return msg;
 }
 

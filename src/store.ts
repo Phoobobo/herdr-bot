@@ -9,6 +9,7 @@ import { resolveBody } from "./integrations.ts";
 import {
   BotError,
   DEFAULT_BODY,
+  DEFAULT_MODEL,
   DEFAULT_SEED_BOTS,
   DEFAULT_SESSION,
   DEFAULT_TEAM_ID,
@@ -18,6 +19,7 @@ import {
   type Bot,
   type Channel,
   type ChannelMessage,
+  type PostOptions,
   type Team,
 } from "./types.ts";
 
@@ -106,10 +108,101 @@ export function seedTeam(): Team {
   });
 }
 
+const STATE_LOCK_STALE_MS = 30_000;
+const STATE_LOCK_TIMEOUT_MS = 60_000;
+let stateLockDepth = 0;
+
+/**
+ * Cross-process lock around team.json writes (mkdir lock next to the file).
+ * Several herdr-bots processes (TUI, `herdr-bots dm`, actions) write the same
+ * file; without it a stale snapshot could clobber another process's message.
+ * Re-entrant within a process.
+ */
+export function withStateLock<T>(fn: () => T): T {
+  if (stateLockDepth > 0) return fn();
+  const lock = `${stateFile()}.lock`;
+  fs.mkdirSync(path.dirname(lock), { recursive: true });
+  const sleeper = new Int32Array(new SharedArrayBuffer(4));
+  const deadline = Date.now() + STATE_LOCK_TIMEOUT_MS;
+  for (;;) {
+    try {
+      fs.mkdirSync(lock);
+      break;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;
+      try {
+        if (Date.now() - fs.statSync(lock).mtimeMs > STATE_LOCK_STALE_MS) {
+          fs.rmSync(lock, { recursive: true, force: true });
+          continue;
+        }
+      } catch {
+        continue;
+      }
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${lock}`);
+      Atomics.wait(sleeper, 0, 0, 10);
+    }
+  }
+  stateLockDepth++;
+  try {
+    return fn();
+  } finally {
+    stateLockDepth--;
+    fs.rmSync(lock, { recursive: true, force: true });
+  }
+}
+
+function mergeMessages(into: ChannelMessage[], disk: ChannelMessage[] | undefined): ChannelMessage[] {
+  if (!disk?.length) return into;
+  const seen = new Set(into.map((m) => m.id));
+  const missing = disk.filter((m) => m && !seen.has(m.id));
+  if (!missing.length) return into;
+  return [...into, ...missing]
+    .map((m, i) => ({ m, i }))
+    .sort((a, b) => (a.m.created_at ?? 0) - (b.m.created_at ?? 0) || a.i - b.i)
+    .map((x) => x.m);
+}
+
+/**
+ * Fold what other processes wrote since `team` was loaded: messages (DMs and
+ * channel posts are append-only, keyed by id) and pinned grok session ids the
+ * snapshot does not have yet. Everything else in the snapshot wins.
+ */
+function mergeFromDisk(team: Team): void {
+  let disk: Team;
+  try {
+    disk = JSON.parse(fs.readFileSync(stateFile(), "utf8")) as Team;
+  } catch {
+    return;
+  }
+  if (!isTeam(disk) || (disk.id && team.id && disk.id !== team.id)) return;
+  for (const [botId, msgs] of Object.entries(disk.dms ?? {})) {
+    team.dms ||= {};
+    team.dms[botId] = mergeMessages(team.dms[botId] ?? [], msgs);
+  }
+  for (const dch of disk.channels ?? []) {
+    const ch = team.channels?.find((c) => c.id === dch.id);
+    if (ch) ch.messages = mergeMessages(ch.messages ?? [], dch.messages);
+  }
+  const roster = (t: Team) => (t.members?.length ? t.members : t.bots) ?? [];
+  for (const dbot of roster(disk)) {
+    const bot = roster(team).find((b) => b.id === dbot.id);
+    if (!bot || !dbot.grok_sessions) continue;
+    for (const [k, v] of Object.entries(dbot.grok_sessions)) {
+      const cur = bot.grok_sessions ?? {};
+      if (v && !(cur as Record<string, string | undefined>)[k]) {
+        bot.grok_sessions = { ...cur, [k]: v };
+      }
+    }
+  }
+}
+
 export function saveTeam(team: Team): void {
-  syncAliases(team);
-  team.updated_at = now();
-  writeAtomic(stateFile(), JSON.stringify(team, null, 2) + "\n");
+  withStateLock(() => {
+    mergeFromDisk(team);
+    syncAliases(team);
+    team.updated_at = now();
+    writeAtomic(stateFile(), JSON.stringify(team, null, 2) + "\n");
+  });
 }
 
 export function saveState(team: Team): void {
@@ -177,7 +270,7 @@ export function findChannel(team: Team, idOrName: string): Channel {
   return ch;
 }
 
-export type BotInput = { name: string; tag?: string; description?: string; body?: string; id?: string };
+export type BotInput = { name: string; tag?: string; description?: string; body?: string; id?: string; model?: string };
 
 export function createBot(input: BotInput): Bot;
 export function createBot(team: Team, input: BotInput): Bot;
@@ -196,6 +289,7 @@ export function createBot(teamOrInput: Team | BotInput, input?: BotInput): Bot {
     tag: (spec.tag ?? "bot").trim() || "bot",
     description: spec.description ?? "",
     body: resolveBody(spec.body),
+    ...(spec.model?.trim() ? { model: spec.model.trim() } : {}),
     created_at: t,
     updated_at: t,
   };
@@ -268,6 +362,32 @@ export function setBody(teamOrName: Team | string, nameOrBody: string, body?: st
 
 export const setBotBody = setBody;
 
+/** Effective grok model for a bot. */
+export function botModel(bot: Pick<Bot, "model">): string {
+  return bot.model?.trim() || DEFAULT_MODEL;
+}
+
+/**
+ * Set the per-bot grok model. Validated against `grok models` when the agent
+ * starts (needs a logged-in grok), not here.
+ */
+export function setModel(name: string, model: string): Bot;
+export function setModel(team: Team, name: string, model: string): Bot;
+export function setModel(teamOrName: Team | string, nameOrModel: string, model?: string): Bot {
+  const team = typeof teamOrName === "string" ? loadState() : syncAliases(teamOrName);
+  const id = typeof teamOrName === "string" ? teamOrName : nameOrModel;
+  const value = (typeof teamOrName === "string" ? nameOrModel : model ?? "").trim();
+  if (!value) throw new BotError("BAD_REQUEST", "model is required");
+  if (/\s/.test(value)) throw new BotError("BAD_REQUEST", `invalid model id: ${value}`);
+  const bot = findBot(team, id);
+  bot.model = value;
+  bot.updated_at = now();
+  saveTeam(team);
+  return bot;
+}
+
+export const setBotModel = setModel;
+
 export function createChannel(name: string): Channel;
 export function createChannel(input: { name: string; description?: string }): Channel;
 export function createChannel(team: Team, input: { name: string; description?: string } | string): Channel;
@@ -314,29 +434,39 @@ export function resolveFrom(team: Team, fromIdOrName: string): { id: string; nam
   return { id: bot.id, name: bot.name };
 }
 
-export function postToChannel(channel: string, fromBot: string, text: string): ChannelMessage;
-export function postToChannel(team: Team, channel: string, fromBot: string, text: string): ChannelMessage;
+export function postToChannel(channel: string, fromBot: string, text: string, opts?: PostOptions): ChannelMessage;
+export function postToChannel(team: Team, channel: string, fromBot: string, text: string, opts?: PostOptions): ChannelMessage;
 export function postToChannel(
   teamOrChannel: Team | string,
   channelOrFrom: string,
   fromOrText: string,
-  text?: string,
+  textOrOpts?: string | PostOptions,
+  maybeOpts?: PostOptions,
 ): ChannelMessage {
-  const team = typeof teamOrChannel === "string" ? loadState() : syncAliases(teamOrChannel);
-  const channel = typeof teamOrChannel === "string" ? teamOrChannel : channelOrFrom;
-  const fromBot = typeof teamOrChannel === "string" ? channelOrFrom : fromOrText;
-  const msgText = typeof teamOrChannel === "string" ? fromOrText : text ?? "";
+  const byName = typeof teamOrChannel === "string";
+  const team = byName ? loadState() : syncAliases(teamOrChannel);
+  const channel = byName ? teamOrChannel : channelOrFrom;
+  const fromBot = byName ? channelOrFrom : fromOrText;
+  const msgText = byName ? fromOrText : (typeof textOrOpts === "string" ? textOrOpts : "");
+  const opts = byName ? (typeof textOrOpts === "object" ? textOrOpts : undefined) : maybeOpts;
   const ch = findChannel(team, channel);
   const from = resolveFrom(team, fromBot);
-  const msg: ChannelMessage = {
-    id: newId("msg"),
-    from_bot_id: from.id,
-    text: msgText,
-    created_at: now(),
-  };
+  const msg = makeMessage(from.id, msgText, opts);
   ch.messages.push(msg);
   ch.updated_at = msg.created_at;
   saveTeam(team);
+  return msg;
+}
+
+function makeMessage(fromId: string, text: string, opts?: PostOptions): ChannelMessage {
+  const msg: ChannelMessage = {
+    id: newId("msg"),
+    from_bot_id: fromId,
+    text,
+    created_at: now(),
+  };
+  // Only set when known, so records without a link stay byte-identical to the old shape.
+  if (opts?.reply_to) msg.reply_to = opts.reply_to;
   return msg;
 }
 
@@ -349,26 +479,24 @@ export function getDm(teamOrBot: Team | string, botId?: string): ChannelMessage[
   return team.dms?.[bot.id] ?? [];
 }
 
-export function postToDm(botId: string, fromIdOrName: string, text: string): ChannelMessage;
-export function postToDm(team: Team, botId: string, fromIdOrName: string, text: string): ChannelMessage;
+export function postToDm(botId: string, fromIdOrName: string, text: string, opts?: PostOptions): ChannelMessage;
+export function postToDm(team: Team, botId: string, fromIdOrName: string, text: string, opts?: PostOptions): ChannelMessage;
 export function postToDm(
   teamOrBot: Team | string,
   botOrFrom: string,
   fromOrText?: string,
-  text?: string,
+  textOrOpts?: string | PostOptions,
+  maybeOpts?: PostOptions,
 ): ChannelMessage {
-  const team = typeof teamOrBot === "string" ? loadState() : syncAliases(teamOrBot);
-  const botId = typeof teamOrBot === "string" ? teamOrBot : botOrFrom;
-  const fromIdOrName = typeof teamOrBot === "string" ? botOrFrom : fromOrText!;
-  const msgText = typeof teamOrBot === "string" ? fromOrText ?? "" : text ?? "";
+  const byId = typeof teamOrBot === "string";
+  const team = byId ? loadState() : syncAliases(teamOrBot);
+  const botId = byId ? teamOrBot : botOrFrom;
+  const fromIdOrName = byId ? botOrFrom : fromOrText!;
+  const msgText = byId ? fromOrText ?? "" : (typeof textOrOpts === "string" ? textOrOpts : "");
+  const opts = byId ? (typeof textOrOpts === "object" ? textOrOpts : undefined) : maybeOpts;
   const bot = findBot(team, botId);
   const from = resolveFrom(team, fromIdOrName);
-  const msg: ChannelMessage = {
-    id: newId("msg"),
-    from_bot_id: from.id,
-    text: msgText,
-    created_at: now(),
-  };
+  const msg = makeMessage(from.id, msgText, opts);
   team.dms ||= {};
   team.dms[bot.id] ||= [];
   team.dms[bot.id].push(msg);

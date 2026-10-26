@@ -42,6 +42,12 @@ contexts = ["global", "workspace"]
 command = ["bun", "run", "src/actions.ts", "set-body"]
 
 [[actions]]
+id = "set-model"
+title = "Set bot grok model"
+contexts = ["global", "workspace"]
+command = ["bun", "run", "src/actions.ts", "set-model"]
+
+[[actions]]
 id = "create-channel"
 title = "Create channel"
 contexts = ["global", "workspace"]

@@ -13,6 +13,7 @@ import {
   agentSlug,
   chAgentSlug,
   deliverChannelPost,
+  deliverDmPost,
   ensureTeamLive,
   formatChannelPrompt,
   formatDmPrompt,
@@ -27,7 +28,29 @@ import {
   sessionSystemPrompt,
   setHerdrRunner,
 } from "./spawn.ts";
-import { getDm, loadOrSeedDefaultTeam, postToChannel, resumeDefaultTeam, setBotDescription } from "./store.ts";
+import {
+  getDm,
+  loadOrSeedDefaultTeam,
+  postToChannel,
+  postToDm,
+  resumeDefaultTeam,
+  setBody,
+  setBotDescription,
+  setModel,
+} from "./store.ts";
+import { encodeCwdForGrok, setGrokModelsRunner } from "./grok.ts";
+import {
+  CODE_BLOCK_REPLY,
+  LONG_CHINESE_REPLY,
+  MULTILINE_REPLY,
+  agentChunk,
+  chunked,
+  toolCall,
+  toolCallDone,
+  turnCompleted,
+  turnLines,
+  userChunk,
+} from "./grok.fixtures.ts";
 
 let dir: string;
 let calls: string[][];
@@ -41,10 +64,28 @@ let promptAgentStatus: string;
 let promptTimeout: boolean;
 let readDump: string | null;
 let startBusySlugs: Set<string>;
+let grokSessions: Map<string, string>;
+let grokReply: ((slug: string, prompt: string) => string) | null;
+let grokWritesReply: boolean;
+let grokPromptCount: Map<string, number>;
+let grokCustomWrite: ((file: string, sid: string, prompt: string, n: number) => void) | null;
+const HERDR_CWD = "/Users/phoobobo/Workspace/herdr-bot";
+
+function grokUpdatesFile(sid: string): string {
+  return path.join(dir, "grok-home", "sessions", encodeCwdForGrok(HERDR_CWD), sid, "updates.jsonl");
+}
+
+/** pi-body tests: switch the four defaults back to pi (body: pi is still supported). */
+function usePiBodies(): void {
+  const team = resumeDefaultTeam();
+  for (const b of team.members) setBody(b.id, "pi");
+}
 
 const WORK_SLUGS = ["lead", "eng", "research", "qa"];
 
 beforeEach(() => {
+  process.env.HERDR_BOT_CWD = HERDR_CWD;
+  delete process.env.HERDR_BOT_GROK_TRUST;
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-bot-spawn-"));
   process.env.HERDR_BOT_STATE_DIR = dir;
   process.env.HERDR_BOT_BODIES = "pi,omp,claude,codex,grok";
@@ -59,6 +100,14 @@ beforeEach(() => {
   promptTimeout = false;
   readDump = null;
   startBusySlugs = new Set();
+  grokSessions = new Map();
+  grokReply = null;
+  grokWritesReply = true;
+  grokPromptCount = new Map();
+  grokCustomWrite = null;
+  process.env.GROK_HOME = path.join(dir, "grok-home");
+  process.env.HERDR_BOT_GROK_MODELS = "grok-4.7,grok-4.6";
+  process.env.HERDR_BOT_GROK_REPLY_GRACE_MS = "300";
   setHerdrRunner(async (args) => {
     calls.push(args);
     const cmd = args.join(" ");
@@ -127,7 +176,17 @@ beforeEach(() => {
       }
       const kind = args[args.indexOf("--kind") + 1];
       const pane = args[args.indexOf("--pane") + 1];
-      agents.push({ name, agent: kind, pane_id: pane, agent_status: "idle" });
+      const dash = args.indexOf("--");
+      const harness = dash >= 0 ? args.slice(dash + 1) : [];
+      const sidFlag = harness.indexOf("--session-id") >= 0 ? "--session-id" : "--resume";
+      const sid = harness.indexOf(sidFlag) >= 0 ? harness[harness.indexOf(sidFlag) + 1] : undefined;
+      const agent: any = { name, agent: kind, pane_id: pane, agent_status: "idle" };
+      if (kind === "grok" && sid) {
+        grokSessions.set(name, sid);
+        // herdr's grok hook reports the native session id (agent_session).
+        agent.agent_session = { source: "herdr:grok", agent: "grok", kind: "id", value: sid };
+      }
+      agents.push(agent);
       const p = panes.find((x) => x.pane_id === pane);
       if (p) {
         p.agent = kind;
@@ -141,6 +200,25 @@ beforeEach(() => {
         return { stdout: "", stderr: "timeout", exitCode: 1 };
       }
       const target = args[2];
+      const live = agents.find((a) => a.name === target);
+      if (live?.agent === "grok") {
+        // Real herdr 0.8.2: agent_prompted carries AgentInfo only, no reply body.
+        // Grok persists the turn to its session log (source-derived fixture lines).
+        const sid = grokSessions.get(target)!;
+        const n = grokPromptCount.get(target) ?? 0;
+        grokPromptCount.set(target, n + 1);
+        if (grokCustomWrite) {
+          const file = grokUpdatesFile(sid);
+          fs.mkdirSync(path.dirname(file), { recursive: true });
+          grokCustomWrite(file, sid, args[3], n);
+        } else if (grokWritesReply) {
+          const file = grokUpdatesFile(sid);
+          fs.mkdirSync(path.dirname(file), { recursive: true });
+          const reply = grokReply ? grokReply(target, args[3]) : `reply from ${target}`;
+          fs.appendFileSync(file, turnLines(sid, args[3], reply, n).map((l) => `${l}\n`).join(""));
+        }
+        return ok({ type: "agent_prompted", agent: { name: target, agent: "grok", agent_status: promptAgentStatus } });
+      }
       const payload: Record<string, unknown> = {
         type: "agent_prompted",
         agent: { name: target, agent_status: promptAgentStatus },
@@ -171,14 +249,23 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  delete process.env.HERDR_BOT_CWD;
   setHerdrRunner(null);
   delete process.env.HERDR_BOT_STATE_DIR;
   delete process.env.HERDR_BOT_BODIES;
+  delete process.env.GROK_HOME;
+  delete process.env.HERDR_BOT_GROK_MODELS;
+  delete process.env.HERDR_BOT_GROK_REPLY_GRACE_MS;
+  setGrokModelsRunner(null);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
 function starts(): string[][] {
   return calls.filter((c) => c[0] === "agent" && c[1] === "start");
+}
+
+function rulesOf(start: string[]): string {
+  return start[start.indexOf("--rules") + 1];
 }
 
 function prompts(): string[][] {
@@ -206,7 +293,19 @@ test("QA gate: ensureTeamLive puts all four default members live", async () => {
   expect(starts().map((c) => c[2]).sort()).toEqual(
     ["eng", "eng-ch", "eng-im", "lead", "lead-ch", "lead-im", "qa", "qa-ch", "qa-im", "research", "research-ch", "research-im"],
   );
+  expect(starts().every((c) => c[c.indexOf("--kind") + 1] === "grok")).toBe(true);
+});
+
+test("body pi is still optional: pi bots start with --kind pi --system-prompt", async () => {
+  usePiBodies();
+  await ensureTeamLive();
+  expect(starts()).toHaveLength(12);
   expect(starts().every((c) => c[c.indexOf("--kind") + 1] === "pi")).toBe(true);
+  for (const seed of DEFAULT_SEED_BOTS) {
+    const work = starts().find((c) => c[2] === seed.id)!;
+    const dash = work.indexOf("--");
+    expect(work.slice(dash)).toEqual(["--", "--system-prompt", identitySystemPrompt(seed)]);
+  }
 });
 
 test("QA gate: work start is identity only; IM/channel starts add a session hint", async () => {
@@ -217,20 +316,30 @@ test("QA gate: work start is identity only; IM/channel starts add a session hint
     const work = all.find((c) => c[2] === seed.id);
     expect(work).toBeDefined();
     const dash = work!.indexOf("--");
-    expect(work!.slice(dash, dash + 3)).toEqual(["--", "--system-prompt", identitySystemPrompt(seed)]);
-    expect(work![dash + 2]).not.toContain(IM_SESSION_HINT);
-    expect(work![dash + 2]).not.toContain(CHANNEL_SESSION_HINT);
+    const sid = grokSessions.get(seed.id)!;
+    expect(work!.slice(dash)).toEqual([
+      "--",
+      "--session-id",
+      sid,
+      "--model",
+      "grok-4.7",
+      "--rules",
+      identitySystemPrompt(seed),
+    ]);
+    const workPrompt = rulesOf(work!);
+    expect(workPrompt).not.toContain(IM_SESSION_HINT);
+    expect(workPrompt).not.toContain(CHANNEL_SESSION_HINT);
 
     const im = all.find((c) => c[2] === `${seed.id}-im`);
     expect(im).toBeDefined();
-    const imPrompt = im![im!.indexOf("--") + 2];
+    const imPrompt = rulesOf(im!);
     expect(imPrompt).toBe(sessionSystemPrompt(seed, "im"));
     expect(imPrompt).toContain(seed.name);
     expect(imPrompt).toContain(IM_SESSION_HINT);
 
     const ch = all.find((c) => c[2] === `${seed.id}-ch`);
     expect(ch).toBeDefined();
-    const chPrompt = ch![ch!.indexOf("--") + 2];
+    const chPrompt = rulesOf(ch!);
     expect(chPrompt).toBe(sessionSystemPrompt(seed, "channel"));
     expect(chPrompt).toContain(seed.name);
     expect(chPrompt).toContain(CHANNEL_SESSION_HINT);
@@ -282,19 +391,16 @@ test("subsequent start of a not-live bot uses updated store identity", async () 
   const all = starts();
   expect(all.map((c) => c[2]).sort()).toEqual(["eng", "eng-ch", "eng-im"]);
   const work = all.find((c) => c[2] === "eng")!;
-  const dash = work.indexOf("--");
-  expect(work.slice(dash, dash + 3)).toEqual([
-    "--",
-    "--system-prompt",
+  expect(rulesOf(work)).toBe(
     identitySystemPrompt({
       name: "研发工程师",
       tag: "eng",
       description: "Ships TypeScript without drama.",
     }),
-  ]);
-  expect(work[dash + 2]).toContain("研发工程师");
-  expect(work[dash + 2]).toContain("Ships TypeScript without drama.");
-  expect(work[dash + 2]).not.toContain("You are an awesome software engineer.");
+  );
+  expect(rulesOf(work)).toContain("研发工程师");
+  expect(rulesOf(work)).toContain("Ships TypeScript without drama.");
+  expect(rulesOf(work)).not.toContain("You are an awesome software engineer.");
 });
 
 test("QA gate: tab1 is bots TUI, never a member name, never 1", async () => {
@@ -584,10 +690,10 @@ test("session read snapshot: wrapped prompt + Pi frame yields two Chinese senten
   expect(reply).not.toContain("Formulating");
 });
 
-test("sendComposer writes the reply when wait JSON is agent_status done with text", async () => {
+test("pi body: sendComposer writes the reply when wait JSON is agent_status done with text", async () => {
   promptAgentStatus = "done";
   promptIncludeText = true;
-  resumeDefaultTeam();
+  usePiBodies();
   await sendComposer({ kind: "bot", index: 1 }, "hello eng");
   const dm = getDm("eng");
   expect(dm.some((m) => m.from_bot_id === "eng" && m.text === "reply from eng-im")).toBe(true);
@@ -598,11 +704,11 @@ test("sendComposer writes the reply when wait JSON is agent_status done with tex
   expect(calls.filter((c) => c[0] === "agent" && c[1] === "read")).toEqual([]);
 });
 
-test("sendComposer reads *-im snapshot when wait JSON is done with no body", async () => {
+test("pi body: sendComposer reads *-im snapshot when wait JSON is done with no body", async () => {
   promptAgentStatus = "done";
   promptIncludeText = false;
   readDump = ENG_IM_READ_FIXTURE;
-  resumeDefaultTeam();
+  usePiBodies();
   await sendComposer({ kind: "bot", index: 1 }, "qa-im-ping-0901-a");
   const dm = getDm("eng");
   expect(dm.map((m) => `${m.from_bot_id}: ${m.text}`)).toEqual([
@@ -617,11 +723,11 @@ test("sendComposer reads *-im snapshot when wait JSON is done with no body", asy
   expect(reads.some((c) => c[2] === "eng")).toBe(false);
 });
 
-test("sendComposer stores the full Chinese IM reply when wait JSON has no body", async () => {
+test("pi body: sendComposer stores the full Chinese IM reply when wait JSON has no body", async () => {
   promptAgentStatus = "done";
   promptIncludeText = false;
   readDump = RESEARCH_IM_READ_FIXTURE;
-  resumeDefaultTeam();
+  usePiBodies();
   await sendComposer({ kind: "bot", index: 2 }, "最近怎么样");
   const dm = getDm("research");
   expect(dm.map((m) => `${m.from_bot_id}: ${m.text}`)).toEqual([
@@ -632,11 +738,11 @@ test("sendComposer stores the full Chinese IM reply when wait JSON has no body",
   expect(reads.map((c) => c[2])).toEqual(["research-im"]);
 });
 
-test("sendComposer stores two Chinese sentences from wrapped-prompt snapshot, not Pi frame", async () => {
+test("pi body: sendComposer stores two Chinese sentences from wrapped-prompt snapshot, not Pi frame", async () => {
   promptAgentStatus = "done";
   promptIncludeText = false;
   readDump = PI_WRAPPED_PROMPT_FIXTURE;
-  resumeDefaultTeam();
+  usePiBodies();
   await sendComposer({ kind: "bot", index: 2 }, PING_0903_TEXT);
   const dm = getDm("research");
   expect(dm.map((m) => `${m.from_bot_id}: ${m.text}`)).toEqual([
@@ -649,14 +755,14 @@ test("sendComposer stores two Chinese sentences from wrapped-prompt snapshot, no
   expect(reads.map((c) => c[2])).toEqual(["research-im"]);
 });
 
-test("sendComposer reads socket JSON .read.text when wait JSON has no body", async () => {
+test("pi body: sendComposer reads socket JSON .read.text when wait JSON has no body", async () => {
   promptAgentStatus = "done";
   promptIncludeText = false;
   readDump = JSON.stringify({
     id: "cli:agent:read",
     result: { read: { text: ENG_IM_READ_FIXTURE } },
   }) + "\n";
-  resumeDefaultTeam();
+  usePiBodies();
   await sendComposer({ kind: "bot", index: 1 }, "qa-im-ping-0901-a");
   const dm = getDm("eng");
   expect(dm.some((m) => m.from_bot_id === "eng" && m.text === "收到：qa-im-ping-0901-a")).toBe(true);
@@ -677,4 +783,203 @@ test("agent start retries agent_pane_busy on a fresh split pane", async () => {
   expect(agents.some((a) => a.name === "eng-im")).toBe(true);
   expect(starts().filter((c) => c[2] === "eng-im")).toHaveLength(2);
   expect(starts().filter((c) => c[2] === "eng")).toHaveLength(1);
+});
+
+// ---------------------------------------------------------------- grok body
+
+const WRITE_BACK_CASES = [
+  ["multi-line", MULTILINE_REPLY],
+  ["code block", CODE_BLOCK_REPLY],
+  ["long Chinese", LONG_CHINESE_REPLY],
+] as const;
+
+test("grok write-back: 4 bots × multi-line / code block / long Chinese DMs land verbatim from the session log", async () => {
+  const team = resumeDefaultTeam();
+  for (const [index, bot] of team.members.entries()) {
+    for (const [label, reply] of WRITE_BACK_CASES) {
+      grokReply = (slug) => `${slug} ${label}:\n${reply}`;
+      await sendComposer({ kind: "bot", index }, `qa-grok-${bot.id}-${label.replace(/ /g, "-")}`);
+    }
+  }
+  for (const bot of team.members) {
+    const dm = getDm(bot.id).filter((m) => m.from_bot_id === bot.id);
+    expect(dm.map((m) => m.text)).toEqual(
+      WRITE_BACK_CASES.map(([label, reply]) => `${bot.id}-im ${label}:\n${reply}`),
+    );
+  }
+  // 12 prompts to the *-im panes, zero screen reads.
+  expect(prompts()).toHaveLength(12);
+  expect(calls.filter((c) => c[0] === "agent" && c[1] === "read")).toEqual([]);
+});
+
+test("grok write-back: #standup channel replies are verbatim and share one stream", async () => {
+  await ensureTeamLive();
+  grokReply = (slug) => (slug === "eng-ch" ? CODE_BLOCK_REPLY : slug === "research-ch" ? LONG_CHINESE_REPLY : `${slug}:\n${MULTILINE_REPLY}`);
+  await sendComposer({ kind: "channel", index: 0 }, "standup: line one\nline two");
+  const ch = loadOrSeedDefaultTeam().channels[0];
+  expect(ch.messages.map((m) => m.from_bot_id)).toEqual(["user", "lead", "eng", "research", "qa"]);
+  expect(ch.messages[0].text).toBe("standup: line one\nline two");
+  expect(ch.messages[1].text).toBe(`lead-ch:\n${MULTILINE_REPLY}`);
+  expect(ch.messages[2].text).toBe(CODE_BLOCK_REPLY);
+  expect(ch.messages[3].text).toBe(LONG_CHINESE_REPLY);
+  expect(ch.messages[4].text).toBe(`qa-ch:\n${MULTILINE_REPLY}`);
+  expect(calls.filter((c) => c[0] === "agent" && c[1] === "read")).toEqual([]);
+});
+
+test("grok sessions are pinned per pane and resumed after grok wrote the session dir", async () => {
+  await openBot("eng");
+  const pinned = resumeDefaultTeam().members.find((b) => b.id === "eng")!.grok_sessions!;
+  expect(Object.keys(pinned).sort()).toEqual(["ch", "im", "work"]);
+  expect(new Set(Object.values(pinned)).size).toBe(3);
+  expect(grokSessions.get("eng")).toBe(pinned.work);
+  expect(grokSessions.get("eng-im")).toBe(pinned.im);
+  expect(grokSessions.get("eng-ch")).toBe(pinned.ch);
+
+  await sendComposer({ kind: "bot", index: 1 }, "hello"); // grok writes eng-im's session dir
+  // Simulate the pane dying: herdr no longer lists the agents.
+  agents.length = 0;
+  calls.length = 0;
+  await openBot("eng");
+  const im = starts().find((c) => c[2] === "eng-im")!;
+  expect(im.slice(im.indexOf("--") + 1, im.indexOf("--") + 3)).toEqual(["--resume", pinned.im!]);
+  const work = starts().find((c) => c[2] === "eng")!;
+  expect(work.slice(work.indexOf("--") + 1, work.indexOf("--") + 3)).toEqual(["--session-id", pinned.work!]);
+});
+
+test("grok model is per bot and validated against `grok models` before start", async () => {
+  resumeDefaultTeam();
+  setModel("qa", "grok-4.6");
+  await openBot("qa");
+  expect(starts().every((c) => c[c.indexOf("--model") + 1] === "grok-4.6")).toBe(true);
+
+  setModel("eng", "grok-9-nope");
+  await expect(openBot("eng")).rejects.toThrow(/grok model "grok-9-nope" is not listed by `grok models` \(available: grok-4\.7, grok-4\.6\)/);
+  expect(starts().some((c) => c[2].startsWith("eng"))).toBe(false);
+});
+
+test("default grok-4.7 fails clearly when a logged-out grok does not list it", async () => {
+  delete process.env.HERDR_BOT_GROK_MODELS;
+  setGrokModelsRunner(() => ({
+    stdout: "You are not authenticated.\n\nDefault model: grok-4.6\n\nAvailable models:\n  * grok-4.6 (default)\n  - grok-4.5\n",
+    stderr: "",
+    exitCode: 0,
+  }));
+  resumeDefaultTeam();
+  await expect(openBot("lead")).rejects.toThrow(/grok-4\.7.*not listed.*grok-4\.6, grok-4\.5.*grok login/);
+  expect(starts()).toEqual([]);
+});
+
+test("grok reply missing from the session log is an error, never an invented or scraped reply", async () => {
+  grokWritesReply = false;
+  resumeDefaultTeam();
+  await expect(sendComposer({ kind: "bot", index: 0 }, "hello")).rejects.toThrow(/no turn_completed/);
+  expect(getDm("lead").map((m) => m.from_bot_id)).toEqual(["user"]);
+  expect(calls.filter((c) => c[0] === "agent" && c[1] === "read")).toEqual([]);
+});
+
+test("herdr agent_session (grok hook) wins over the pinned id", async () => {
+  await openBot("lead");
+  const other = "019a0b7c-aaaa-7bbb-8ccc-dddddddddddd";
+  const im = agents.find((a) => a.name === "lead-im")!;
+  im.agent_session.value = other;
+  grokSessions.set("lead-im", other);
+  grokReply = () => "from the live session";
+  await sendComposer({ kind: "bot", index: 0 }, "hi");
+  expect(getDm("lead").at(-1)!.text).toBe("from the live session");
+  expect(fs.existsSync(grokUpdatesFile(other))).toBe(true);
+});
+
+test("TUI composer DM with a tool call stores only the final segment in dms.<id>", async () => {
+  resumeDefaultTeam();
+  grokCustomWrite = (file, sid, prompt, n) => {
+    fs.appendFileSync(
+      file,
+      [
+        userChunk(sid, prompt, n),
+        agentChunk(sid, "Let me check the repo first."),
+        toolCall(sid, "t1", "Read README.md"),
+        toolCallDone(sid, "t1"),
+        agentChunk(sid, "The README says:\n"),
+        agentChunk(sid, LONG_CHINESE_REPLY),
+        turnCompleted(sid),
+      ].map((l) => `${l}\n`).join(""),
+    );
+  };
+  await sendComposer({ kind: "bot", index: 2 }, "读一下 README");
+  const dm = loadOrSeedDefaultTeam().dms!.research;
+  expect(dm.map((m) => m.from_bot_id)).toEqual(["user", "research"]);
+  expect(dm[1].text).toBe(`The README says:\n${LONG_CHINESE_REPLY}`);
+  expect(JSON.stringify(loadOrSeedDefaultTeam())).not.toContain("Let me check the repo first.");
+});
+
+test("two quick TUI DMs to one bot are serialized and never cross replies", async () => {
+  resumeDefaultTeam();
+  let busy = false;
+  let overlap = false;
+  grokCustomWrite = (file, sid, prompt, n) => {
+    if (busy) overlap = true;
+    busy = true;
+    fs.appendFileSync(file, `${userChunk(sid, prompt, n)}\n`);
+    // Grok finishes the turn later (after herdr's --wait already returned).
+    setTimeout(() => {
+      const reply = prompt.includes("one") ? MULTILINE_REPLY : CODE_BLOCK_REPLY;
+      fs.appendFileSync(file, [...chunked(reply).map((c) => agentChunk(sid, c)), turnCompleted(sid)].map((l) => `${l}\n`).join(""));
+      busy = false;
+    }, 120);
+  };
+  await Promise.all([
+    sendComposer({ kind: "bot", index: 1 }, "message one"),
+    sendComposer({ kind: "bot", index: 1 }, "message two"),
+  ]);
+  expect(overlap).toBe(false);
+  const dm = getDm("eng");
+  // Both user lines are stored first (composer echo), then each reply in send order.
+  expect(dm.filter((m) => m.from_bot_id === "user").map((m) => m.text)).toEqual(["message one", "message two"]);
+  expect(dm.filter((m) => m.from_bot_id === "eng").map((m) => m.text)).toEqual([MULTILINE_REPLY, CODE_BLOCK_REPLY]);
+  // Stored Q,Q,A,A: each reply links to the question it answers.
+  expect(dm.map((m) => m.from_bot_id)).toEqual(["user", "user", "eng", "eng"]);
+  const [q1, q2, a1, a2] = dm;
+  expect(a1.reply_to).toBe(q1.id);
+  expect(a2.reply_to).toBe(q2.id);
+  expect(q1.reply_to).toBeUndefined();
+  expect(q2.reply_to).toBeUndefined();
+});
+
+test("reply_to: TUI DM and channel replies link to the user post; CLI dm path (deliverDmPost) too", async () => {
+  await ensureTeamLive();
+  const dmQ = await sendComposer({ kind: "bot", index: 0 }, "hello lead");
+  const dmA = getDm("lead").find((m) => m.from_bot_id === "lead")!;
+  expect(dmA.reply_to).toBe(dmQ!.id);
+
+  const chQ = await sendComposer({ kind: "channel", index: 0 }, "hi team");
+  const ch = loadOrSeedDefaultTeam().channels[0];
+  const replies = ch.messages.filter((m) => m.from_bot_id !== USER_ID);
+  expect(replies).toHaveLength(4);
+  expect(replies.every((m) => m.reply_to === chQ!.id)).toBe(true);
+
+  // `herdr-bots dm` stores the user message, then passes its id to deliverDmPost.
+  const cliQ = postToDm("eng", USER_ID, "from cli");
+  await deliverDmPost("eng", "from cli", cliQ.id);
+  const cliA = getDm("eng").filter((m) => m.from_bot_id === "eng").pop()!;
+  expect(cliA.reply_to).toBe(cliQ.id);
+
+  // Callers that pass no id (older code paths) still store a plain reply.
+  await deliverDmPost("eng", "no link");
+  const plain = getDm("eng").filter((m) => m.from_bot_id === "eng").pop()!;
+  expect(plain.reply_to).toBeUndefined();
+});
+
+test("HERDR_BOT_GROK_TRUST=1 adds grok's --trust (opt-in; off by default)", async () => {
+  await openBot("lead");
+  expect(starts().some((c) => c.includes("--trust"))).toBe(false);
+  agents.length = 0;
+  calls.length = 0;
+  process.env.HERDR_BOT_GROK_TRUST = "1";
+  try {
+    await openBot("lead");
+  } finally {
+    delete process.env.HERDR_BOT_GROK_TRUST;
+  }
+  const im = starts().find((c) => c[2] === "lead-im")!;
+  expect(im.slice(im.indexOf("--") + 3, im.indexOf("--") + 4)).toEqual(["--trust"]);
 });

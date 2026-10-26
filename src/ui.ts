@@ -78,6 +78,43 @@ export function truncate(s: string, maxW: number): string {
   return out + "…";
 }
 
+/**
+ * Wrap text to a display width (CJK/emoji aware). Hard newlines are kept as
+ * separate rows (blank lines included), tabs expand to spaces, other control
+ * characters are dropped. Long lines break at the last space that fits when
+ * there is one, otherwise mid-run (CJK has no spaces). Never truncates.
+ */
+export function wrapText(text: string, width: number): string[] {
+  const maxW = Math.max(1, width);
+  const rows: string[] = [];
+  for (const rawLine of text.replace(/\r\n?/g, "\n").split("\n")) {
+    let line = "";
+    let lineW = 0;
+    const src = rawLine.replace(/\t/g, "  ");
+    for (const ch of src) {
+      const cw = charWidth(ch);
+      if (cw === 0) continue;
+      if (lineW + cw > maxW && lineW > 0) {
+        const sp = line.lastIndexOf(" ");
+        if (sp > 0 && ch !== " ") {
+          rows.push(line.slice(0, sp));
+          line = line.slice(sp + 1);
+          lineW = strWidth(line);
+        } else {
+          rows.push(line);
+          line = "";
+          lineW = 0;
+        }
+        if (ch === " " && lineW === 0) continue; // swallow the break space
+      }
+      line += ch;
+      lineW += cw;
+    }
+    rows.push(line);
+  }
+  return rows;
+}
+
 interface Cell {
   ch: string; // "" marks the continuation half of a wide char
   style: string;
